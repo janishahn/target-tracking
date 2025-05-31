@@ -157,12 +157,17 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
             mask_ultra = cv2.bitwise_or(mask1_ultra, mask2_ultra)
             
             # Conservative ranges (NEW - for better accuracy)
-            mask1_conservative = cv2.inRange(hsv, (0, 70, 70), (10, 255, 255))
-            mask2_conservative = cv2.inRange(hsv, (165, 70, 70), (180, 255, 255))
+            mask1_conservative = cv2.inRange(hsv, (0, 50, 40), (12, 255, 255))  # More balanced thresholds
+            mask2_conservative = cv2.inRange(hsv, (168, 50, 40), (180, 255, 255))  # More balanced thresholds
             mask_conservative = cv2.bitwise_or(mask1_conservative, mask2_conservative)
             
-            # Use the conservative range for final detection (most accurate)
-            mask = mask_conservative
+            # Balanced ranges (RECOMMENDED - good compromise)
+            mask1_balanced = cv2.inRange(hsv, (0, 40, 30), (15, 255, 255))
+            mask2_balanced = cv2.inRange(hsv, (165, 40, 30), (180, 255, 255))
+            mask_balanced = cv2.bitwise_or(mask1_balanced, mask2_balanced)
+            
+            # Use the balanced range for final detection (best compromise)
+            mask = mask_balanced
             detected_pixels = cv2.countNonZero(mask)
             
             # Print diagnostic info every 30 frames
@@ -171,7 +176,8 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 perm_pixels = cv2.countNonZero(mask_perm)
                 ultra_pixels = cv2.countNonZero(mask_ultra)
                 conservative_pixels = cv2.countNonZero(mask_conservative)
-                print(f"  HSV Analysis - Original: {orig_pixels}, Permissive: {perm_pixels}, Ultra: {ultra_pixels}, Conservative: {conservative_pixels}")
+                balanced_pixels = cv2.countNonZero(mask_balanced)
+                print(f"  HSV Analysis - Original: {orig_pixels}, Permissive: {perm_pixels}, Ultra: {ultra_pixels}, Conservative: {conservative_pixels}, Balanced: {balanced_pixels}")
                 
                 # Sample HSV values from center region
                 h, w = hsv.shape[:2]
@@ -213,13 +219,14 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                     cv2.putText(overlay_blended, f"Red Detection Overlay - {detected_pixels} pixels", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     
-                    # Create comparison image showing all four mask types
+                    # Create comparison image showing all five mask types
                     h, w = mask_orig.shape
-                    comparison = np.zeros((h, w*4), dtype=np.uint8)
+                    comparison = np.zeros((h, w*5), dtype=np.uint8)
                     comparison[:, 0:w] = mask_orig
                     comparison[:, w:2*w] = mask_perm  
                     comparison[:, 2*w:3*w] = mask_ultra
                     comparison[:, 3*w:4*w] = mask_conservative
+                    comparison[:, 4*w:5*w] = mask_balanced
                     
                     # Convert BGR back to RGB for correct color saving (like main script)
                     frame_to_save = cv2.cvtColor(frame_annotated_bgr, cv2.COLOR_BGR2RGB)
@@ -234,7 +241,8 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                     perm_pixels = cv2.countNonZero(mask_perm)
                     ultra_pixels = cv2.countNonZero(mask_ultra)
                     conservative_pixels = cv2.countNonZero(mask_conservative)
-                    print(f"  -> Saved frame {frame_count:03d}: Original={orig_pixels}, Permissive={perm_pixels}, Ultra={ultra_pixels}, Conservative={conservative_pixels} pixels")
+                    balanced_pixels = cv2.countNonZero(mask_balanced)
+                    print(f"  -> Saved frame {frame_count:03d}: Original={orig_pixels}, Permissive={perm_pixels}, Ultra={ultra_pixels}, Conservative={conservative_pixels}, Balanced={balanced_pixels} pixels")
                 frame_count += 1
             else:
                 # GUI mode - show windows and handle keyboard input
@@ -284,7 +292,7 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
             print("  - test_frame_*.jpg: Original camera frames with annotations")
             print("  - test_mask_*.jpg: HSV detection masks (white = detected red pixels)")
             print("  - test_overlay_*.jpg: Red detection overlay on original frame")
-            print("  - test_comparison_*.jpg: Side-by-side comparison of Original|Permissive|Ultra|Conservative masks")
+            print("  - test_comparison_*.jpg: Side-by-side comparison of Original|Permissive|Ultra|Conservative|Balanced masks")
         
     except ImportError:
         print("Picamera2 not available. Please run this on a Raspberry Pi with camera.")
