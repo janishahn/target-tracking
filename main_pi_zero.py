@@ -2,15 +2,17 @@
 """
 Raspberry Pi Zero 2W Headless Target Tracking with Periodic Snapshots
 Optimized for headless operation with performance monitoring and snapshot capture
+Supports both live camera feed and MP4 file processing
 """
 
 import time
 import threading
 import os
 import json
+import argparse
 from queue import Queue
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import cv2
 from picamera2 import Picamera2
@@ -179,6 +181,45 @@ def camera_capture_thread(picam2: Picamera2, frame_queue: Queue):
             print(f"Error in capture thread: {e}")
             break
 
+def video_file_thread(video_path: str, frame_queue: Queue):
+    """
+    Video file reading thread for MP4 processing
+    """
+    print(f"Starting video file thread for: {video_path}")
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        print(f"Error: Could not open video file {video_path}")
+        return
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_delay = 1.0 / fps if fps > 0 else 1.0 / 30.0  # Default to 30 FPS if unknown
+    
+    print(f"Video FPS: {fps:.1f}, Frame delay: {frame_delay:.3f}s")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("End of video file reached")
+            break
+            
+        try:
+            # Resize frame to match camera resolution (320x240)
+            frame_resized = cv2.resize(frame, (320, 240))
+            
+            if not frame_queue.full():
+                frame_queue.put_nowait(frame_resized)
+            
+            # Maintain original video timing
+            time.sleep(frame_delay)
+                
+        except Exception as e:
+            print(f"Error in video file thread: {e}")
+            break
+    
+    cap.release()
+    print("Video file processing completed")
+
 def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple) -> str:
     """
     Save annotated frame snapshot with tracking information
@@ -202,13 +243,31 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
     cv2.imwrite(filepath, frame)
     return filename
 
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Headless Target Tracker')
+    parser.add_argument('--source', type=str, help='MP4 video file to process instead of live camera')
+    return parser.parse_args()
+
 def main():
     """
     Main headless application loop for Pi Zero 2W
     """
+    # Parse command line arguments
+    args = parse_arguments()
+    
     print("=" * 60)
     print("RASPBERRY PI ZERO 2W HEADLESS TARGET TRACKER")
     print("=" * 60)
+    
+    if args.source:
+        print(f"Processing video file: {args.source}")
+        if not os.path.exists(args.source):
+            print(f"Error: Video file '{args.source}' not found!")
+            return
+    else:
+        print("Using live camera feed...")
+    
     print("Headless operation with periodic snapshots...")
     
     # Configuration for headless operation
@@ -226,21 +285,38 @@ def main():
     print(f"Snapshot interval: every {snapshot_interval} frames")
     print(f"Status interval: every {status_interval} frames")
     
-    # Step 1: Initialize camera
-    try:
-        picam2 = initialize_camera_pi_zero()
-    except Exception as e:
-        print(f"Failed to initialize camera: {e}")
-        print("Make sure the camera is properly connected and enabled.")
-        return
+    # Step 1: Initialize video source
+    picam2 = None
+    if args.source:
+        # Video file mode - no camera initialization needed
+        print("Video file mode - skipping camera initialization")
+    else:
+        # Live camera mode
+        try:
+            picam2 = initialize_camera_pi_zero()
+        except Exception as e:
+            print(f"Failed to initialize camera: {e}")
+            print("Make sure the camera is properly connected and enabled.")
+            return
     
-    # Step 2: Setup frame queue
+    # Step 2: Setup frame queue and capture thread
     frame_queue = Queue(maxsize=2)
-    capture_thread = threading.Thread(
-        target=camera_capture_thread, 
-        args=(picam2, frame_queue), 
-        daemon=True
-    )
+    
+    if args.source:
+        # Start video file thread
+        capture_thread = threading.Thread(
+            target=video_file_thread, 
+            args=(args.source, frame_queue), 
+            daemon=True
+        )
+    else:
+        # Start camera capture thread
+        capture_thread = threading.Thread(
+            target=camera_capture_thread, 
+            args=(picam2, frame_queue), 
+            daemon=True
+        )
+    
     capture_thread.start()
     
     # Step 3: Initialize tracking components
@@ -256,13 +332,22 @@ def main():
         while True:
             # Get frame from capture queue
             if frame_queue.empty():
+                # For video files, check if thread is still alive
+                if args.source and not capture_thread.is_alive():
+                    print("Video file processing completed")
+                    break
                 time.sleep(0.001)
                 continue
                 
             frame_rgb = frame_queue.get()
             
-            # Convert RGB to BGR for OpenCV processing
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            # Convert frame format if needed
+            if args.source:
+                # Video file frames are already in BGR format
+                frame_bgr = frame_rgb
+            else:
+                # Camera frames are in RGB format, convert to BGR
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             
             # Process frame through tracker pipeline
             annotated_frame = tracker.process_frame(frame_bgr)
@@ -322,9 +407,10 @@ def main():
         print(f"Session Duration: {final_report['session_info']['duration_seconds']:.1f}s")
         print(f"Output Directory: {output_dir}")
         
-        # Stop camera
-        picam2.stop()
-        print("Camera stopped")
+        # Stop camera if it was used
+        if picam2:
+            picam2.stop()
+            print("Camera stopped")
         
         print("Headless tracker stopped successfully!")
 
