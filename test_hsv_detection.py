@@ -85,10 +85,36 @@ def test_hsv_ranges_on_image(image_path):
     print(f"\nDebug images saved to: {output_dir}/")
     print("Check the mask images to see which HSV ranges work best")
 
-def test_with_camera():
+def test_with_camera(force_headless=False):
     """Test HSV detection with live camera feed"""
     print("Testing with live camera feed...")
-    print("Press 's' to save test image, 'q' to quit")
+    
+    # Check if we're in headless mode
+    headless_mode = force_headless
+    
+    if not force_headless:
+        try:
+            import os
+            if os.environ.get('DISPLAY'):
+                # Try to create a test window to see if display works
+                test_img = np.zeros((100, 100, 3), dtype=np.uint8)
+                cv2.imshow("test", test_img)
+                cv2.waitKey(1)
+                cv2.destroyAllWindows()
+                headless_mode = False
+                print("Display detected - GUI mode enabled")
+                print("Press 's' to save test image, 'q' to quit")
+            else:
+                print("No display detected - running in headless mode")
+                headless_mode = True
+        except:
+            print("Display not available - running in headless mode")
+            headless_mode = True
+    else:
+        print("Headless mode forced via command line")
+    
+    if headless_mode:
+        print("Will capture 50 frames and save every 10th frame for analysis")
     
     try:
         from picamera2 import Picamera2
@@ -101,7 +127,9 @@ def test_with_camera():
         picam2.start()
         
         frame_count = 0
-        while True:
+        max_frames = 50 if headless_mode else 1000
+        
+        while frame_count < max_frames:
             frame_rgb = picam2.capture_array("main")
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             
@@ -119,8 +147,16 @@ def test_with_camera():
             cv2.putText(frame_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
-            # Show result (if display available)
-            try:
+            if headless_mode:
+                # Headless mode - print stats and save periodic frames
+                print(f"Frame {frame_count:3d}: Red pixels detected: {detected_pixels:4d}")
+                if frame_count % 10 == 0:  # Save every 10th frame
+                    cv2.imwrite(f"test_frame_{frame_count:03d}.jpg", frame_bgr)
+                    cv2.imwrite(f"test_mask_{frame_count:03d}.jpg", mask)
+                    print(f"  -> Saved test_frame_{frame_count:03d}.jpg and mask")
+                frame_count += 1
+            else:
+                # GUI mode - show windows and handle keyboard input
                 cv2.imshow("HSV Test", frame_bgr)
                 cv2.imshow("Red Mask", mask)
                 
@@ -132,20 +168,15 @@ def test_with_camera():
                     cv2.imwrite(f"test_mask_{frame_count:03d}.jpg", mask)
                     print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg")
                     frame_count += 1
-            except:
-                # Headless mode - just print stats
-                print(f"Frame {frame_count}: Red pixels detected: {detected_pixels}")
-                if frame_count % 30 == 0:  # Save every 30 frames
-                    cv2.imwrite(f"test_frame_{frame_count:03d}.jpg", frame_bgr)
-                    cv2.imwrite(f"test_mask_{frame_count:03d}.jpg", mask)
-                    print(f"Saved test_frame_{frame_count:03d}.jpg")
-                frame_count += 1
-                
-                if frame_count > 100:  # Stop after 100 frames in headless mode
-                    break
         
         picam2.stop()
-        cv2.destroyAllWindows()
+        if not headless_mode:
+            cv2.destroyAllWindows()
+        
+        print(f"\nTest completed! Processed {frame_count} frames.")
+        if headless_mode:
+            print("Check the saved test_frame_*.jpg and test_mask_*.jpg files")
+            print("White areas in mask images show detected red pixels")
         
     except ImportError:
         print("Picamera2 not available. Please run this on a Raspberry Pi with camera.")
@@ -154,13 +185,19 @@ def test_with_camera():
 
 if __name__ == "__main__":
     import sys
+    import argparse
     
     print("HSV Color Detection Test")
     print("=" * 30)
     
-    if len(sys.argv) > 1:
+    parser = argparse.ArgumentParser(description='Test HSV color detection for red objects')
+    parser.add_argument('--image', type=str, help='Test with image file instead of camera')
+    parser.add_argument('--headless', action='store_true', help='Force headless mode (no GUI)')
+    args = parser.parse_args()
+    
+    if args.image:
         # Test with provided image
-        test_hsv_ranges_on_image(sys.argv[1])
+        test_hsv_ranges_on_image(args.image)
     else:
         # Test with camera
-        test_with_camera() 
+        test_with_camera(force_headless=args.headless) 
