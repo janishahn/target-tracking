@@ -134,19 +134,21 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
         
         while frame_count < max_frames:
             frame_rgb = picam2.capture_array("main")
-            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             
-            # Test HSV detection
-            hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+            # Convert RGB directly to HSV for correct color detection
+            hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2HSV)
             
-            # Use relaxed ranges
+            # Use relaxed ranges for red detection
             mask1 = cv2.inRange(hsv, (0, 50, 50), (15, 255, 255))
             mask2 = cv2.inRange(hsv, (155, 50, 50), (180, 255, 255))
             mask = cv2.bitwise_or(mask1, mask2)
             
             detected_pixels = cv2.countNonZero(mask)
             
-            # Annotate frame
+            # Convert to BGR only for display/annotation purposes
+            frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            
+            # Annotate frame (BGR format for OpenCV text rendering)
             cv2.putText(frame_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
@@ -156,7 +158,12 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 if frame_count % 10 == 0:  # Save every 10th frame
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
-                    cv2.imwrite(frame_path, frame_bgr)
+                    # Save RGB frame with correct colors (OpenCV expects BGR for saving)
+                    frame_to_save = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    # Add annotation to the BGR version
+                    cv2.putText(frame_to_save, f"Red pixels: {detected_pixels}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
                     print(f"  -> Saved test_frame_{frame_count:03d}.jpg and mask")
                 frame_count += 1
@@ -171,7 +178,12 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 elif key == ord('s'):
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
-                    cv2.imwrite(frame_path, frame_bgr)
+                    # Save RGB frame with correct colors (OpenCV expects BGR for saving)
+                    frame_to_save = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+                    # Add annotation to the BGR version
+                    cv2.putText(frame_to_save, f"Red pixels: {detected_pixels}", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
                     print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg to {output_dir}/")
                     frame_count += 1
