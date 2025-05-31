@@ -35,10 +35,36 @@ Run with a demo video file:
 python target_tracker.py --source demo.mp4
 ```
 
-Run with camera (webcam or Pi camera):
+Run with camera (webcam or USB camera):
 ```bash
 python target_tracker.py --camera
 ```
+
+### NEW: Live Camera Streaming
+
+For live video streaming with camera:
+
+**macOS Built-in Webcam (Development):**
+```bash
+python3 main_macos.py
+```
+
+**Raspberry Pi Camera (Standard):**
+```bash
+python3 main_pi.py
+```
+
+**Raspberry Pi Camera (Pi Zero 2W Optimized):**
+```bash
+python3 main_pi_zero.py
+```
+
+**Headless operation (SSH/remote):**
+```bash
+python3 main_pi_headless.py
+```
+
+> **📖 See [PI_CAMERA_SETUP.md](PI_CAMERA_SETUP.md) for complete setup guide**
 
 ### Command Line Options
 
@@ -55,9 +81,16 @@ python target_tracker.py --camera
 python target_tracker.py --source demo.mp4 --debug
 ```
 
-**Production on Raspberry Pi with camera:**
+**Production on Raspberry Pi with USB camera:**
 ```bash
 USE_PI_CAMERA=1 python target_tracker.py --camera --no-display --csv
+```
+
+**Live camera streaming (NEW):**
+```bash
+python3 main_macos.py           # macOS built-in webcam
+python3 main_pi.py              # Raspberry Pi camera (full GUI)
+python3 main_pi_headless.py     # Raspberry Pi camera (headless)
 ```
 
 **CSV output for data analysis:**
