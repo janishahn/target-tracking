@@ -138,12 +138,41 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
             # Convert RGB directly to HSV for correct color detection
             hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2HSV)
             
-            # Use relaxed ranges for red detection
-            mask1 = cv2.inRange(hsv, (0, 50, 50), (15, 255, 255))
-            mask2 = cv2.inRange(hsv, (155, 50, 50), (180, 255, 255))
-            mask = cv2.bitwise_or(mask1, mask2)
+            # Test multiple HSV ranges to find what works
+            # Original relaxed ranges
+            mask1_orig = cv2.inRange(hsv, (0, 50, 50), (15, 255, 255))
+            mask2_orig = cv2.inRange(hsv, (155, 50, 50), (180, 255, 255))
+            mask_orig = cv2.bitwise_or(mask1_orig, mask2_orig)
             
+            # Very permissive ranges (lower saturation/value thresholds)
+            mask1_perm = cv2.inRange(hsv, (0, 30, 30), (20, 255, 255))
+            mask2_perm = cv2.inRange(hsv, (150, 30, 30), (180, 255, 255))
+            mask_perm = cv2.bitwise_or(mask1_perm, mask2_perm)
+            
+            # Ultra-wide ranges (for debugging)
+            mask1_ultra = cv2.inRange(hsv, (0, 20, 20), (25, 255, 255))
+            mask2_ultra = cv2.inRange(hsv, (145, 20, 20), (180, 255, 255))
+            mask_ultra = cv2.bitwise_or(mask1_ultra, mask2_ultra)
+            
+            # Use the most permissive range for now
+            mask = mask_ultra
             detected_pixels = cv2.countNonZero(mask)
+            
+            # Print diagnostic info every 30 frames
+            if frame_count % 30 == 0:
+                orig_pixels = cv2.countNonZero(mask_orig)
+                perm_pixels = cv2.countNonZero(mask_perm)
+                ultra_pixels = cv2.countNonZero(mask_ultra)
+                print(f"  HSV Analysis - Original: {orig_pixels}, Permissive: {perm_pixels}, Ultra: {ultra_pixels}")
+                
+                # Sample HSV values from center region
+                h, w = hsv.shape[:2]
+                center_hsv = hsv[h//4:3*h//4, w//4:3*w//4]  # Center 50% of image
+                if center_hsv.size > 0:
+                    h_vals = center_hsv[:,:,0].flatten()
+                    s_vals = center_hsv[:,:,1].flatten()
+                    v_vals = center_hsv[:,:,2].flatten()
+                    print(f"  Center HSV ranges - H: {h_vals.min()}-{h_vals.max()}, S: {s_vals.min()}-{s_vals.max()}, V: {v_vals.min()}-{v_vals.max()}")
             
             # Convert to BGR only for display/annotation purposes
             frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
@@ -158,16 +187,44 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 if frame_count % 10 == 0:  # Save every 10th frame
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
+                    overlay_path = os.path.join(output_dir, f"test_overlay_{frame_count:03d}.jpg")
+                    comparison_path = os.path.join(output_dir, f"test_comparison_{frame_count:03d}.jpg")
+                    
                     # Follow the exact same approach as main_pi_zero.py save_snapshot
                     # Annotate the BGR frame (for proper text rendering)
                     frame_annotated_bgr = frame_bgr.copy()
                     cv2.putText(frame_annotated_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Create overlay visualization showing detected red pixels
+                    overlay_bgr = frame_bgr.copy()
+                    # Make detected pixels bright red in overlay
+                    overlay_bgr[mask > 0] = [0, 0, 255]  # BGR red
+                    # Blend original frame with red overlay
+                    overlay_blended = cv2.addWeighted(frame_bgr, 0.7, overlay_bgr, 0.3, 0)
+                    cv2.putText(overlay_blended, f"Red Detection Overlay - {detected_pixels} pixels", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    # Create comparison image showing all three mask types
+                    h, w = mask_orig.shape
+                    comparison = np.zeros((h, w*3), dtype=np.uint8)
+                    comparison[:, 0:w] = mask_orig
+                    comparison[:, w:2*w] = mask_perm  
+                    comparison[:, 2*w:3*w] = mask_ultra
+                    
                     # Convert BGR back to RGB for correct color saving (like main script)
                     frame_to_save = cv2.cvtColor(frame_annotated_bgr, cv2.COLOR_BGR2RGB)
+                    overlay_to_save = cv2.cvtColor(overlay_blended, cv2.COLOR_BGR2RGB)
+                    
                     cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
-                    print(f"  -> Saved test_frame_{frame_count:03d}.jpg and mask")
+                    cv2.imwrite(overlay_path, overlay_to_save)
+                    cv2.imwrite(comparison_path, comparison)
+                    
+                    orig_pixels = cv2.countNonZero(mask_orig)
+                    perm_pixels = cv2.countNonZero(mask_perm)
+                    ultra_pixels = cv2.countNonZero(mask_ultra)
+                    print(f"  -> Saved frame {frame_count:03d}: Original={orig_pixels}, Permissive={perm_pixels}, Ultra={ultra_pixels} pixels")
                 frame_count += 1
             else:
                 # GUI mode - show windows and handle keyboard input
@@ -180,16 +237,31 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 elif key == ord('s'):
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
+                    overlay_path = os.path.join(output_dir, f"test_overlay_{frame_count:03d}.jpg")
+                    
                     # Follow the exact same approach as main_pi_zero.py save_snapshot
                     # Annotate the BGR frame (for proper text rendering)
                     frame_annotated_bgr = frame_bgr.copy()
                     cv2.putText(frame_annotated_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Create overlay visualization showing detected red pixels
+                    overlay_bgr = frame_bgr.copy()
+                    # Make detected pixels bright red in overlay
+                    overlay_bgr[mask > 0] = [0, 0, 255]  # BGR red
+                    # Blend original frame with red overlay
+                    overlay_blended = cv2.addWeighted(frame_bgr, 0.7, overlay_bgr, 0.3, 0)
+                    cv2.putText(overlay_blended, f"Red Detection Overlay - {detected_pixels} pixels", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
                     # Convert BGR back to RGB for correct color saving (like main script)
                     frame_to_save = cv2.cvtColor(frame_annotated_bgr, cv2.COLOR_BGR2RGB)
+                    overlay_to_save = cv2.cvtColor(overlay_blended, cv2.COLOR_BGR2RGB)
+                    
                     cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
-                    print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg to {output_dir}/")
+                    cv2.imwrite(overlay_path, overlay_to_save)
+                    print(f"Saved test_frame_{frame_count:03d}.jpg, mask, and overlay to {output_dir}/")
                     frame_count += 1
         
         picam2.stop()
@@ -201,6 +273,8 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
             print(f"Check the saved files in {output_dir}/:")
             print("  - test_frame_*.jpg: Original camera frames with annotations")
             print("  - test_mask_*.jpg: HSV detection masks (white = detected red pixels)")
+            print("  - test_overlay_*.jpg: Red detection overlay on original frame")
+            print("  - test_comparison_*.jpg: Side-by-side comparison of Original|Permissive|Ultra masks")
         
     except ImportError:
         print("Picamera2 not available. Please run this on a Raspberry Pi with camera.")
