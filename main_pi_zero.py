@@ -220,7 +220,7 @@ def video_file_thread(video_path: str, frame_queue: Queue):
     cap.release()
     print("Video file processing completed")
 
-def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False) -> str:
+def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False, debug_mask: any = None) -> str:
     """
     Save annotated frame snapshot with tracking information
     
@@ -230,6 +230,7 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
         frame_number: Current frame number
         tracker_state: (cx, cy, radius, locked, bbox) from tracker
         is_camera_feed: True if frame came from live camera (needs BGR->RGB conversion)
+        debug_mask: Optional debug mask to save alongside the frame
         
     Returns:
         Filename of saved snapshot
@@ -250,6 +251,14 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
         frame_to_save = frame
     
     cv2.imwrite(filepath, frame_to_save)
+    
+    # Save debug mask if provided
+    if debug_mask is not None:
+        mask_filename = f"mask_f{frame_number:06d}_{timestamp}_{status}.jpg"
+        mask_filepath = os.path.join(output_dir, mask_filename)
+        cv2.imwrite(mask_filepath, debug_mask)
+        print(f"Debug mask saved: {mask_filename}")
+    
     return filename
 
 def parse_arguments():
@@ -284,11 +293,25 @@ def main():
     snapshot_interval = 30  # Save snapshot every N frames
     status_interval = 150   # Print status every N frames
     
+    # Enable diagnostic mode for detection debugging
+    diagnostic_mode = True
+    
     # Disable all GUI-related config options
     Config.SHOW_FPS = False
     Config.SHOW_MASK = False
     Config.DEBUG = False
     Config.ENABLE_RESULT_LOGGING = False  # Disable the built-in logging
+    
+    # Diagnostic: Relax detection parameters for better detection
+    if diagnostic_mode:
+        print("DIAGNOSTIC MODE ENABLED - Relaxing detection parameters")
+        Config.MIN_AREA = 50  # Reduce from 200 to 50
+        Config.MIN_CIRCULARITY = 0.3  # Reduce from 0.6 to 0.3
+        Config.HSV_LOWER1 = (0, 50, 50)    # More permissive red range
+        Config.HSV_UPPER1 = (15, 255, 255)
+        Config.HSV_LOWER2 = (155, 50, 50)  # More permissive red range  
+        Config.HSV_UPPER2 = (180, 255, 255)
+        snapshot_interval = 10  # More frequent snapshots for debugging
     
     print(f"Output directory: {output_dir}")
     print(f"Snapshot interval: every {snapshot_interval} frames")
@@ -334,6 +357,9 @@ def main():
     
     print("\nHeadless tracking started!")
     print(f"Target: Red objects, min area: {Config.MIN_AREA} pixels")
+    if diagnostic_mode:
+        print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
+        print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
     print("Press Ctrl+C to stop...")
     
     try:
@@ -370,13 +396,22 @@ def main():
                 has_detection, locked, tracker.lock_duration
             )
             
-            # Save periodic snapshots
+            # Save periodic snapshots with debug information
             if tracker.frame_count % snapshot_interval == 0:
+                debug_mask = tracker.get_debug_mask() if diagnostic_mode else None
                 filename = save_snapshot(
                     annotated_frame, output_dir, tracker.frame_count, 
-                    (cx, cy, radius, locked, bbox), is_camera_feed=not args.source
+                    (cx, cy, radius, locked, bbox), is_camera_feed=not args.source,
+                    debug_mask=debug_mask
                 )
                 print(f"Snapshot saved: {filename}")
+                
+                # Diagnostic: Print detailed detection info
+                if diagnostic_mode:
+                    mask_stats = cv2.countNonZero(debug_mask) if debug_mask is not None else 0
+                    print(f"  Debug info - Mask pixels: {mask_stats}, Detection: {has_detection}")
+                    print(f"  HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1}, {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
+                    print(f"  Min area: {Config.MIN_AREA}, Min circularity: {Config.MIN_CIRCULARITY}")
             
             # Print status periodically
             if tracker.frame_count % status_interval == 0:
