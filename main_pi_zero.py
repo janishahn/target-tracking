@@ -3,6 +3,7 @@
 Raspberry Pi Zero 2W Headless Target Tracking with Periodic Snapshots
 Optimized for headless operation with performance monitoring and snapshot capture
 Supports both live camera feed and MP4 file processing
+Configured to track GREEN objects instead of red
 """
 
 import time
@@ -306,15 +307,22 @@ def main():
     Config.DEBUG = False
     Config.ENABLE_RESULT_LOGGING = False  # Disable the built-in logging
     
+    # Configure for GREEN object tracking (default ranges)
+    Config.HSV_LOWER1 = (45, 60, 60)    # Green range (conservative)
+    Config.HSV_UPPER1 = (75, 255, 255)
+    Config.HSV_LOWER2 = (40, 50, 50)    # Extended green range
+    Config.HSV_UPPER2 = (80, 255, 255)
+    
     # Diagnostic: Relax detection parameters for better detection
     if diagnostic_mode:
-        print("DIAGNOSTIC MODE ENABLED - Relaxing detection parameters")
+        print("DIAGNOSTIC MODE ENABLED - Relaxing detection parameters for GREEN objects")
         Config.MIN_AREA = 50  # Reduce from 200 to 50
         Config.MIN_CIRCULARITY = 0.3  # Reduce from 0.6 to 0.3
-        Config.HSV_LOWER1 = (0, 50, 50)    # More permissive red range
-        Config.HSV_UPPER1 = (15, 255, 255)
-        Config.HSV_LOWER2 = (155, 50, 50)  # More permissive red range  
-        Config.HSV_UPPER2 = (180, 255, 255)
+        # Green HSV ranges - green doesn't wrap around like red, so we use one main range
+        Config.HSV_LOWER1 = (40, 50, 50)    # Green range (hue 40-80)
+        Config.HSV_UPPER1 = (80, 255, 255)
+        Config.HSV_LOWER2 = (35, 40, 40)    # Extended green range for edge cases
+        Config.HSV_UPPER2 = (85, 255, 255)
         snapshot_interval = 10  # More frequent snapshots for debugging
     
     print(f"Output directory: {output_dir}")
@@ -363,7 +371,7 @@ def main():
     print("\nHeadless tracking started!")
     print(f"Camera FOV: 640x480 (double resolution for larger field of view)")
     print(f"Processing resolution: 320x240 (maintains Pi Zero workload)")
-    print(f"Target: Red objects, min area: {Config.MIN_AREA} pixels")
+    print(f"Target: Green objects, min area: {Config.MIN_AREA} pixels")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
         print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
