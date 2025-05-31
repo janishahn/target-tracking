@@ -85,9 +85,13 @@ def test_hsv_ranges_on_image(image_path):
     print(f"\nDebug images saved to: {output_dir}/")
     print("Check the mask images to see which HSV ranges work best")
 
-def test_with_camera(force_headless=False):
+def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
     """Test HSV detection with live camera feed"""
     print("Testing with live camera feed...")
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Output directory: {output_dir}/")
     
     # Check if we're in headless mode
     headless_mode = force_headless
@@ -151,8 +155,10 @@ def test_with_camera(force_headless=False):
                 # Headless mode - print stats and save periodic frames
                 print(f"Frame {frame_count:3d}: Red pixels detected: {detected_pixels:4d}")
                 if frame_count % 10 == 0:  # Save every 10th frame
-                    cv2.imwrite(f"test_frame_{frame_count:03d}.jpg", frame_bgr)
-                    cv2.imwrite(f"test_mask_{frame_count:03d}.jpg", mask)
+                    frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
+                    mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
+                    cv2.imwrite(frame_path, frame_bgr)
+                    cv2.imwrite(mask_path, mask)
                     print(f"  -> Saved test_frame_{frame_count:03d}.jpg and mask")
                 frame_count += 1
             else:
@@ -164,9 +170,11 @@ def test_with_camera(force_headless=False):
                 if key == ord('q'):
                     break
                 elif key == ord('s'):
-                    cv2.imwrite(f"test_frame_{frame_count:03d}.jpg", frame_bgr)
-                    cv2.imwrite(f"test_mask_{frame_count:03d}.jpg", mask)
-                    print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg")
+                    frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
+                    mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
+                    cv2.imwrite(frame_path, frame_bgr)
+                    cv2.imwrite(mask_path, mask)
+                    print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg to {output_dir}/")
                     frame_count += 1
         
         picam2.stop()
@@ -175,8 +183,9 @@ def test_with_camera(force_headless=False):
         
         print(f"\nTest completed! Processed {frame_count} frames.")
         if headless_mode:
-            print("Check the saved test_frame_*.jpg and test_mask_*.jpg files")
-            print("White areas in mask images show detected red pixels")
+            print(f"Check the saved files in {output_dir}/:")
+            print("  - test_frame_*.jpg: Original camera frames with annotations")
+            print("  - test_mask_*.jpg: HSV detection masks (white = detected red pixels)")
         
     except ImportError:
         print("Picamera2 not available. Please run this on a Raspberry Pi with camera.")
@@ -193,6 +202,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Test HSV color detection for red objects')
     parser.add_argument('--image', type=str, help='Test with image file instead of camera')
     parser.add_argument('--headless', action='store_true', help='Force headless mode (no GUI)')
+    parser.add_argument('--output', type=str, default='hsv_camera_test', help='Output directory for test files (default: hsv_camera_test)')
     args = parser.parse_args()
     
     if args.image:
@@ -200,4 +210,4 @@ if __name__ == "__main__":
         test_hsv_ranges_on_image(args.image)
     else:
         # Test with camera
-        test_with_camera(force_headless=args.headless) 
+        test_with_camera(force_headless=args.headless, output_dir=args.output) 
