@@ -158,11 +158,13 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 if frame_count % 10 == 0:  # Save every 10th frame
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
-                    # Save RGB frame with correct colors (OpenCV expects BGR for saving)
-                    frame_to_save = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                    # Add annotation to the BGR version
-                    cv2.putText(frame_to_save, f"Red pixels: {detected_pixels}", (10, 30), 
+                    # Follow the exact same approach as main_pi_zero.py save_snapshot
+                    # Annotate the BGR frame (for proper text rendering)
+                    frame_annotated_bgr = frame_bgr.copy()
+                    cv2.putText(frame_annotated_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    # Convert BGR back to RGB for correct color saving (like main script)
+                    frame_to_save = cv2.cvtColor(frame_annotated_bgr, cv2.COLOR_BGR2RGB)
                     cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
                     print(f"  -> Saved test_frame_{frame_count:03d}.jpg and mask")
@@ -178,11 +180,13 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
                 elif key == ord('s'):
                     frame_path = os.path.join(output_dir, f"test_frame_{frame_count:03d}.jpg")
                     mask_path = os.path.join(output_dir, f"test_mask_{frame_count:03d}.jpg")
-                    # Save RGB frame with correct colors (OpenCV expects BGR for saving)
-                    frame_to_save = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                    # Add annotation to the BGR version
-                    cv2.putText(frame_to_save, f"Red pixels: {detected_pixels}", (10, 30), 
+                    # Follow the exact same approach as main_pi_zero.py save_snapshot
+                    # Annotate the BGR frame (for proper text rendering)
+                    frame_annotated_bgr = frame_bgr.copy()
+                    cv2.putText(frame_annotated_bgr, f"Red pixels: {detected_pixels}", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    # Convert BGR back to RGB for correct color saving (like main script)
+                    frame_to_save = cv2.cvtColor(frame_annotated_bgr, cv2.COLOR_BGR2RGB)
                     cv2.imwrite(frame_path, frame_to_save)
                     cv2.imwrite(mask_path, mask)
                     print(f"Saved test_frame_{frame_count:03d}.jpg and test_mask_{frame_count:03d}.jpg to {output_dir}/")
