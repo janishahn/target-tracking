@@ -233,11 +233,11 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
     Save annotated frame snapshot with tracking information
     
     Args:
-        frame: Annotated frame from tracker
+        frame: Annotated frame from tracker (always in BGR format after processing)
         output_dir: Directory to save snapshots
         frame_number: Current frame number
         tracker_state: (cx, cy, radius, locked, bbox) from tracker
-        is_camera_feed: True if frame came from live camera (needs BGR->RGB conversion)
+        is_camera_feed: True if frame came from live camera
         debug_mask: Optional debug mask to save alongside the frame
         
     Returns:
@@ -250,15 +250,11 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
     filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}.jpg"
     filepath = os.path.join(output_dir, filename)
     
-    # Fix color channel inversion for camera feed
-    if is_camera_feed:
-        # Convert BGR back to RGB for correct color saving
-        frame_to_save = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    else:
-        # Video file frames are already in correct format
-        frame_to_save = frame
-    
-    cv2.imwrite(filepath, frame_to_save)
+    # The frame from tracker is always in BGR format after processing
+    # cv2.imwrite() expects BGR format, so we save directly
+    # The color inversion issue was due to the tracker's automatic RGB->BGR conversion
+    # which is now handled correctly in the tracker itself
+    cv2.imwrite(filepath, frame)
     
     # Save debug mask if provided
     if debug_mask is not None:
