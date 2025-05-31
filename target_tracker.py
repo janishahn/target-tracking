@@ -742,6 +742,90 @@ class TargetTracker:
         else:
             return (-1, -1, 0, False, (-1, -1, 0, 0))
     
+    def calculate_distance_from_center(self, cx: int, cy: int) -> Tuple[float, int, int, int, int]:
+        """
+        Calculate distance and offset of object center from frame center.
+        
+        Args:
+            cx, cy: Object center coordinates
+            
+        Returns:
+            (absolute_distance, x_offset, y_offset, frame_center_x, frame_center_y)
+            - absolute_distance: Euclidean distance in pixels
+            - x_offset: Horizontal offset (positive = east/right, negative = west/left)
+            - y_offset: Vertical offset (positive = south/down, negative = north/up)
+            - frame_center_x, frame_center_y: Frame center coordinates for reference
+        """
+        frame_center_x = Config.FRAME_WIDTH // 2
+        frame_center_y = Config.FRAME_HEIGHT // 2
+        
+        x_offset = cx - frame_center_x
+        y_offset = cy - frame_center_y
+        
+        absolute_distance = np.sqrt(x_offset**2 + y_offset**2)
+        
+        return (absolute_distance, x_offset, y_offset, frame_center_x, frame_center_y)
+    
+    def get_state_with_distance(self) -> Tuple[int, int, int, bool, Tuple[int, int, int, int], Tuple[float, int, int, int, int]]:
+        """
+        Get current tracking state including distance information.
+        
+        Returns:
+            (cx, cy, radius, locked_flag, bbox, distance_info)
+            - distance_info: (abs_distance, x_offset, y_offset, center_x, center_y)
+            - Returns (-1, -1, 0, False, (-1, -1, 0, 0), (0.0, 0, 0, center_x, center_y)) if lost
+        """
+        frame_center_x = Config.FRAME_WIDTH // 2
+        frame_center_y = Config.FRAME_HEIGHT // 2
+        
+        if self.locked and self.smoothed_centroid is not None and self.smoothed_bbox is not None:
+            cx = int(self.smoothed_centroid[0])
+            cy = int(self.smoothed_centroid[1])
+            radius = int(self.smoothed_radius)
+            bbox = (int(self.smoothed_bbox[0]), int(self.smoothed_bbox[1]), 
+                   int(self.smoothed_bbox[2]), int(self.smoothed_bbox[3]))
+            
+            distance_info = self.calculate_distance_from_center(cx, cy)
+            
+            return (cx, cy, radius, True, bbox, distance_info)
+        else:
+            return (-1, -1, 0, False, (-1, -1, 0, 0), (0.0, 0, 0, frame_center_x, frame_center_y))
+
+    def get_directional_description(self, x_offset: int, y_offset: int) -> str:
+        """
+        Generate human-readable directional description of object position relative to frame center.
+        
+        Args:
+            x_offset: Horizontal offset (positive = east/right, negative = west/left)
+            y_offset: Vertical offset (positive = south/down, negative = north/up)
+            
+        Returns:
+            Human-readable description like "15 pixels north and 8 pixels east"
+        """
+        if x_offset == 0 and y_offset == 0:
+            return "at frame center"
+        
+        parts = []
+        
+        # Vertical component
+        if y_offset < 0:
+            parts.append(f"{abs(y_offset)} pixels north")
+        elif y_offset > 0:
+            parts.append(f"{y_offset} pixels south")
+        
+        # Horizontal component
+        if x_offset < 0:
+            parts.append(f"{abs(x_offset)} pixels west")
+        elif x_offset > 0:
+            parts.append(f"{x_offset} pixels east")
+        
+        if len(parts) == 2:
+            return f"{parts[0]} and {parts[1]}"
+        elif len(parts) == 1:
+            return parts[0]
+        else:
+            return "at frame center"
+    
     def annotate(self, frame: np.ndarray) -> np.ndarray:
         """
         Add visualization overlay to frame (in-place for performance).
@@ -753,7 +837,13 @@ class TargetTracker:
             Same frame object with annotations added
         """
         frame_for_display = frame  # No copy - annotate in-place
-        cx, cy, radius, locked, bbox = self.get_state()
+        cx, cy, radius, locked, bbox, distance_info = self.get_state_with_distance()
+        abs_distance, x_offset, y_offset, frame_center_x, frame_center_y = distance_info
+        
+        # Always draw frame center crosshairs for reference
+        cv2.line(frame_for_display, (frame_center_x-8, frame_center_y), (frame_center_x+8, frame_center_y), (255, 255, 255), 1)
+        cv2.line(frame_for_display, (frame_center_x, frame_center_y-8), (frame_center_x, frame_center_y+8), (255, 255, 255), 1)
+        cv2.circle(frame_for_display, (frame_center_x, frame_center_y), 3, (255, 255, 255), 1)
         
         if locked:
             bbox_x, bbox_y, bbox_w, bbox_h = bbox
@@ -774,6 +864,9 @@ class TargetTracker:
             
             # Draw center point
             cv2.circle(frame_for_display, (cx, cy), 2, (0, 255, 0), -1)
+            
+            # Draw line from frame center to object center
+            cv2.line(frame_for_display, (frame_center_x, frame_center_y), (cx, cy), (255, 255, 0), 1)
             
             # Add bounding box coordinates at top-left corner of the box (only if showing bounding box)
             if Config.SHOW_BOUNDING_BOX:
@@ -807,6 +900,19 @@ class TargetTracker:
             # Show bounding box info
             bbox_info_text = f"BBox: ({bbox_x},{bbox_y}) {bbox_w}x{bbox_h}"
             cv2.putText(frame_for_display, bbox_info_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Show distance information
+            distance_text = f"Distance: {abs_distance:.1f}px"
+            cv2.putText(frame_for_display, distance_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Show offset information
+            offset_text = f"Offset: ({x_offset:+d}, {y_offset:+d})"
+            cv2.putText(frame_for_display, offset_text, (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Show directional description (if there's space)
+            if frame_for_display.shape[0] > 140:  # Only show if frame is tall enough
+                direction_text = self.get_directional_description(x_offset, y_offset)
+                cv2.putText(frame_for_display, direction_text, (10, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
         else:
             # Target lost
             status_text = "TARGET LOST"

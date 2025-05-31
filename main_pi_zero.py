@@ -37,6 +37,12 @@ class HeadlessPerformanceTracker:
         self.current_lock_start = None
         self.current_lock_duration = 0
         
+        # Distance tracking
+        self.distance_samples = []
+        self.total_distance_sum = 0.0
+        self.min_distance = float('inf')
+        self.max_distance = 0.0
+        
         # FPS tracking
         self.fps_samples = []
         self.last_frame_time = time.time()
@@ -46,7 +52,7 @@ class HeadlessPerformanceTracker:
         
         print(f"Performance tracking initialized. Output: {output_dir}")
     
-    def update_frame_metrics(self, has_detection: bool, is_locked: bool, lock_duration: int):
+    def update_frame_metrics(self, has_detection: bool, is_locked: bool, lock_duration: int, distance_info: tuple = None):
         """Update frame-level performance metrics"""
         current_time = time.time()
         
@@ -69,6 +75,19 @@ class HeadlessPerformanceTracker:
             self.frames_locked += 1
             self.current_lock_duration = lock_duration
             
+            # Track distance information if available
+            if distance_info:
+                abs_distance, x_offset, y_offset, _, _ = distance_info
+                self.distance_samples.append(abs_distance)
+                self.total_distance_sum += abs_distance
+                self.min_distance = min(self.min_distance, abs_distance)
+                self.max_distance = max(self.max_distance, abs_distance)
+                
+                # Keep only last 100 distance samples for rolling statistics
+                if len(self.distance_samples) > 100:
+                    removed_distance = self.distance_samples.pop(0)
+                    self.total_distance_sum -= removed_distance
+            
             # Track lock session start
             if self.current_lock_start is None:
                 self.current_lock_start = self.total_frames
@@ -90,13 +109,22 @@ class HeadlessPerformanceTracker:
         detection_rate = (self.frames_with_detection / self.total_frames * 100) if self.total_frames > 0 else 0
         lock_rate = (self.frames_locked / self.total_frames * 100) if self.total_frames > 0 else 0
         
+        # Distance statistics
+        avg_distance = self.total_distance_sum / len(self.distance_samples) if self.distance_samples else 0
+        min_dist = self.min_distance if self.min_distance != float('inf') else 0
+        max_dist = self.max_distance
+        
         return {
             'total_frames': self.total_frames,
             'avg_fps': avg_fps,
             'detection_rate': detection_rate,
             'lock_rate': lock_rate,
             'lock_sessions': len(self.lock_sessions),
-            'current_lock_duration': self.current_lock_duration
+            'current_lock_duration': self.current_lock_duration,
+            'avg_distance': avg_distance,
+            'min_distance': min_dist,
+            'max_distance': max_dist,
+            'distance_samples': len(self.distance_samples)
         }
     
     def save_final_report(self):
@@ -127,7 +155,13 @@ class HeadlessPerformanceTracker:
                 'lock_rate_percent': stats['lock_rate'],
                 'total_lock_sessions': len(self.lock_sessions),
                 'frames_with_detection': self.frames_with_detection,
-                'frames_locked': self.frames_locked
+                'frames_locked': self.frames_locked,
+                'distance_statistics': {
+                    'average_distance_px': stats['avg_distance'],
+                    'min_distance_px': stats['min_distance'],
+                    'max_distance_px': stats['max_distance'],
+                    'distance_samples_count': stats['distance_samples']
+                }
             },
             'lock_sessions': self.lock_sessions,
             'configuration': {
@@ -229,7 +263,7 @@ def video_file_thread(video_path: str, frame_queue: Queue):
     cap.release()
     print("Video file processing completed")
 
-def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False, debug_mask: any = None) -> str:
+def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False, debug_mask: any = None, distance_info: tuple = None) -> str:
     """
     Save annotated frame snapshot with tracking information
     
@@ -240,6 +274,7 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
         tracker_state: (cx, cy, radius, locked, bbox) from tracker
         is_camera_feed: True if frame came from live camera
         debug_mask: Optional debug mask to save alongside the frame
+        distance_info: Optional (abs_distance, x_offset, y_offset, center_x, center_y) tuple
         
     Returns:
         Filename of saved snapshot
@@ -248,7 +283,13 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
     cx, cy, radius, locked, bbox = tracker_state
     status = "LOCKED" if locked else "LOST"
     
-    filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}.jpg"
+    # Add distance info to filename if available
+    if distance_info and locked:
+        abs_distance, x_offset, y_offset, _, _ = distance_info
+        filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}_d{abs_distance:.0f}px.jpg"
+    else:
+        filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}.jpg"
+    
     filepath = os.path.join(output_dir, filename)
     
     # The frame from tracker is always in BGR format after processing
@@ -295,7 +336,7 @@ def main():
     
     # Configuration for headless operation
     output_dir = "pi_zero_output"
-    snapshot_interval = 10  # Save snapshot every N frames
+    snapshot_interval = 5  # Save snapshot every N frames
     status_interval = 150   # Print status every N frames
     
     # Enable diagnostic mode for detection debugging
@@ -406,13 +447,14 @@ def main():
             # Process frame through tracker pipeline
             annotated_frame = tracker.process_frame(frame_bgr)
             
-            # Get tracking state
-            cx, cy, radius, locked, bbox = tracker.get_state()
+            # Get tracking state with distance information
+            cx, cy, radius, locked, bbox, distance_info = tracker.get_state_with_distance()
+            abs_distance, x_offset, y_offset, frame_center_x, frame_center_y = distance_info
             has_detection = (cx != -1 and cy != -1)
             
             # Update performance metrics
             performance_tracker.update_frame_metrics(
-                has_detection, locked, tracker.lock_duration
+                has_detection, locked, tracker.lock_duration, distance_info
             )
             
             # Save periodic snapshots with debug information
@@ -421,9 +463,16 @@ def main():
                 filename = save_snapshot(
                     annotated_frame, output_dir, tracker.frame_count, 
                     (cx, cy, radius, locked, bbox), is_camera_feed=not args.source,
-                    debug_mask=debug_mask
+                    debug_mask=debug_mask, distance_info=distance_info
                 )
                 print(f"Snapshot saved: {filename}")
+                
+                # Print distance information if target is detected
+                if has_detection and locked:
+                    direction_desc = tracker.get_directional_description(x_offset, y_offset)
+                    print(f"  Distance: {abs_distance:.1f}px from center ({frame_center_x}, {frame_center_y})")
+                    print(f"  Position: {direction_desc}")
+                    print(f"  Offset: ({x_offset:+d}, {y_offset:+d}) pixels")
                 
                 # Diagnostic: Print detailed detection info
                 if diagnostic_mode:
@@ -443,6 +492,10 @@ def main():
                 if locked:
                     print(f"Current Lock: {stats['current_lock_duration']} frames")
                     print(f"Target: ({cx}, {cy}) radius={radius}")
+                    direction_desc = tracker.get_directional_description(x_offset, y_offset)
+                    print(f"Distance: {abs_distance:.1f}px from center - {direction_desc}")
+                    if stats['distance_samples'] > 0:
+                        print(f"Avg Distance: {stats['avg_distance']:.1f}px (min: {stats['min_distance']:.1f}, max: {stats['max_distance']:.1f})")
                 else:
                     print("Status: TARGET LOST")
                 print("-" * 35)
@@ -468,6 +521,12 @@ def main():
         print(f"Lock Rate: {metrics['lock_rate_percent']:.1f}%")
         print(f"Lock Sessions: {metrics['total_lock_sessions']}")
         print(f"Session Duration: {final_report['session_info']['duration_seconds']:.1f}s")
+        
+        # Distance statistics
+        distance_stats = metrics['distance_statistics']
+        if distance_stats['distance_samples_count'] > 0:
+            print(f"Distance Stats: Avg={distance_stats['average_distance_px']:.1f}px, Min={distance_stats['min_distance_px']:.1f}px, Max={distance_stats['max_distance_px']:.1f}px")
+        
         print(f"Output Directory: {output_dir}")
         
         # Stop camera if it was used
