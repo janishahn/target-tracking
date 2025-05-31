@@ -1,0 +1,700 @@
+#!/usr/bin/env python3
+"""
+Raspberry Pi Zero 2W Target Tracking with Live HTTP MJPEG Streaming
+Streams annotated video feed to network while maintaining headless operation
+Access stream at: http://PI_IP_ADDRESS:8080/stream
+"""
+
+import time
+import threading
+import os
+import json
+import argparse
+from queue import Queue
+from datetime import datetime
+from typing import Dict, Any, Optional
+import socket
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+import cv2
+from picamera2 import Picamera2
+from target_tracker import TargetTracker, Config
+
+class StreamingHandler(BaseHTTPRequestHandler):
+    """HTTP handler for MJPEG streaming"""
+    
+    def do_GET(self):
+        if self.path == '/stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'multipart/x-mixed-replace; boundary=--jpgboundary')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            
+            try:
+                while True:
+                    if hasattr(self.server, 'current_frame') and self.server.current_frame is not None:
+                        # Encode frame as JPEG
+                        ret, jpeg = cv2.imencode('.jpg', self.server.current_frame, 
+                                               [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        if ret:
+                            self.wfile.write(b'--jpgboundary\r\n')
+                            self.send_header('Content-Type', 'image/jpeg')
+                            self.send_header('Content-Length', str(len(jpeg)))
+                            self.end_headers()
+                            self.wfile.write(jpeg.tobytes())
+                            self.wfile.write(b'\r\n')
+                    
+                    time.sleep(0.033)  # ~30 FPS max
+                    
+            except Exception as e:
+                print(f"Streaming error: {e}")
+                
+        elif self.path == '/':
+            # Serve a simple HTML page to view the stream
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html')
+            self.end_headers()
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Pi Zero Target Tracker Stream</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }}
+                    .container {{ max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }}
+                    .stream {{ text-align: center; margin: 20px 0; }}
+                    .info {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin: 10px 0; }}
+                    img {{ max-width: 100%; border: 2px solid #333; border-radius: 5px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🎯 Pi Zero Target Tracker Live Stream</h1>
+                    <div class="info">
+                        <strong>Status:</strong> Tracking GREEN objects<br>
+                        <strong>Resolution:</strong> 320x240 (processed from 640x480 capture)<br>
+                        <strong>Device:</strong> Raspberry Pi Zero 2W
+                    </div>
+                    <div class="stream">
+                        <img src="/stream" alt="Live Stream">
+                    </div>
+                    <div class="info">
+                        <strong>Stream URL:</strong> http://{self.get_pi_ip()}:8080/stream<br>
+                        <strong>Access:</strong> Open this URL in VLC, browser, or any MJPEG viewer
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            self.wfile.write(html.encode())
+        else:
+            self.send_error(404)
+    
+    def get_pi_ip(self):
+        """Get Pi's IP address"""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "PI_IP_ADDRESS"
+    
+    def log_message(self, format, *args):
+        # Suppress HTTP log messages
+        pass
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Threading HTTP server for concurrent connections"""
+    allow_reuse_address = True
+    daemon_threads = True
+
+class HeadlessPerformanceTracker:
+    """
+    Performance tracking for headless Pi Zero operation.
+    Tracks FPS, detection rates, and lock performance without creating markdown files.
+    """
+    
+    def __init__(self, output_dir: str):
+        self.output_dir = output_dir
+        self.session_start = datetime.now()
+        
+        # Performance metrics
+        self.total_frames = 0
+        self.frames_with_detection = 0
+        self.frames_locked = 0
+        self.lock_sessions = []
+        self.current_lock_start = None
+        self.current_lock_duration = 0
+        
+        # Distance tracking
+        self.distance_samples = []
+        self.total_distance_sum = 0.0
+        self.min_distance = float('inf')
+        self.max_distance = 0.0
+        
+        # FPS tracking
+        self.fps_samples = []
+        self.last_frame_time = time.time()
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        print(f"Performance tracking initialized. Output: {output_dir}")
+    
+    def update_frame_metrics(self, has_detection: bool, is_locked: bool, lock_duration: int, distance_info: tuple = None):
+        """Update frame-level performance metrics"""
+        current_time = time.time()
+        
+        # Calculate instantaneous FPS
+        if self.total_frames > 0:
+            frame_fps = 1.0 / (current_time - self.last_frame_time)
+            self.fps_samples.append(frame_fps)
+            
+            # Keep only last 100 samples for rolling average
+            if len(self.fps_samples) > 100:
+                self.fps_samples.pop(0)
+        
+        self.last_frame_time = current_time
+        self.total_frames += 1
+        
+        if has_detection:
+            self.frames_with_detection += 1
+        
+        if is_locked:
+            self.frames_locked += 1
+            self.current_lock_duration = lock_duration
+            
+            # Track distance information if available
+            if distance_info:
+                abs_distance, x_offset, y_offset, _, _ = distance_info
+                self.distance_samples.append(abs_distance)
+                self.total_distance_sum += abs_distance
+                self.min_distance = min(self.min_distance, abs_distance)
+                self.max_distance = max(self.max_distance, abs_distance)
+                
+                # Keep only last 100 distance samples for rolling statistics
+                if len(self.distance_samples) > 100:
+                    removed_distance = self.distance_samples.pop(0)
+                    self.total_distance_sum -= removed_distance
+            
+            # Track lock session start
+            if self.current_lock_start is None:
+                self.current_lock_start = self.total_frames
+        else:
+            # End current lock session if it was active
+            if self.current_lock_start is not None:
+                session_data = {
+                    'start_frame': self.current_lock_start,
+                    'end_frame': self.total_frames - 1,
+                    'duration': self.current_lock_duration
+                }
+                self.lock_sessions.append(session_data)
+                self.current_lock_start = None
+                self.current_lock_duration = 0
+    
+    def get_current_stats(self) -> Dict[str, Any]:
+        """Get current performance statistics"""
+        avg_fps = sum(self.fps_samples) / len(self.fps_samples) if self.fps_samples else 0
+        detection_rate = (self.frames_with_detection / self.total_frames * 100) if self.total_frames > 0 else 0
+        lock_rate = (self.frames_locked / self.total_frames * 100) if self.total_frames > 0 else 0
+        
+        # Distance statistics
+        avg_distance = self.total_distance_sum / len(self.distance_samples) if self.distance_samples else 0
+        min_dist = self.min_distance if self.min_distance != float('inf') else 0
+        max_dist = self.max_distance
+        
+        return {
+            'total_frames': self.total_frames,
+            'avg_fps': avg_fps,
+            'detection_rate': detection_rate,
+            'lock_rate': lock_rate,
+            'lock_sessions': len(self.lock_sessions),
+            'current_lock_duration': self.current_lock_duration,
+            'avg_distance': avg_distance,
+            'min_distance': min_dist,
+            'max_distance': max_dist,
+            'distance_samples': len(self.distance_samples)
+        }
+    
+    def save_final_report(self):
+        """Save final performance report as JSON"""
+        # Close any ongoing lock session
+        if self.current_lock_start is not None:
+            session_data = {
+                'start_frame': self.current_lock_start,
+                'end_frame': self.total_frames,
+                'duration': self.current_lock_duration
+            }
+            self.lock_sessions.append(session_data)
+        
+        stats = self.get_current_stats()
+        session_duration = (datetime.now() - self.session_start).total_seconds()
+        
+        final_report = {
+            'session_info': {
+                'start_time': self.session_start.isoformat(),
+                'end_time': datetime.now().isoformat(),
+                'duration_seconds': session_duration,
+                'device': 'Raspberry Pi Zero 2W'
+            },
+            'performance_metrics': {
+                'total_frames_processed': self.total_frames,
+                'average_fps': stats['avg_fps'],
+                'detection_rate_percent': stats['detection_rate'],
+                'lock_rate_percent': stats['lock_rate'],
+                'total_lock_sessions': len(self.lock_sessions),
+                'frames_with_detection': self.frames_with_detection,
+                'frames_locked': self.frames_locked,
+                'distance_statistics': {
+                    'average_distance_px': stats['avg_distance'],
+                    'min_distance_px': stats['min_distance'],
+                    'max_distance_px': stats['max_distance'],
+                    'distance_samples_count': stats['distance_samples']
+                }
+            },
+            'lock_sessions': self.lock_sessions,
+            'configuration': {
+                'frame_width': Config.FRAME_WIDTH,
+                'frame_height': Config.FRAME_HEIGHT,
+                'min_area': Config.MIN_AREA,
+                'min_circularity': Config.MIN_CIRCULARITY,
+                'smoothing_alpha': Config.SMOOTHING_ALPHA
+            }
+        }
+        
+        timestamp = self.session_start.strftime("%Y%m%d_%H%M%S")
+        report_file = os.path.join(self.output_dir, f"{timestamp}_performance_report.json")
+        
+        with open(report_file, 'w') as f:
+            json.dump(final_report, f, indent=2)
+        
+        print(f"Final performance report saved: {report_file}")
+        return final_report
+
+def get_pi_ip_address():
+    """Get the Pi's IP address for network access"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return "Unable to determine IP"
+
+def start_streaming_server(port=8080):
+    """Start the HTTP streaming server"""
+    try:
+        server = ThreadingHTTPServer(('0.0.0.0', port), StreamingHandler)
+        server.current_frame = None
+        
+        # Start server in a separate thread
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        
+        pi_ip = get_pi_ip_address()
+        print(f"🌐 Streaming server started!")
+        print(f"📺 View stream at: http://{pi_ip}:{port}")
+        print(f"🔗 Direct stream URL: http://{pi_ip}:{port}/stream")
+        print(f"💻 Open in browser, VLC, or any MJPEG viewer")
+        
+        return server
+        
+    except Exception as e:
+        print(f"Failed to start streaming server: {e}")
+        return None
+
+def initialize_camera_pi_zero() -> Picamera2:
+    """
+    Initialize camera optimized for Pi Zero 2W headless operation with larger FOV
+    Captures at double resolution (640x480) then downsamples to maintain processing workload
+    """
+    print("Initializing Raspberry Pi camera (headless mode with larger FOV)...")
+    picam2 = Picamera2()
+    
+    # Configure camera to capture at double resolution for larger field of view
+    # We'll downsample to 320x240 for processing to maintain Pi Zero workload
+    camera_config = picam2.create_video_configuration(
+        main={"size": (640, 480), "format": "RGB888"},
+        buffer_count=2
+    )
+    picam2.configure(camera_config)
+    picam2.start()
+    
+    print("Camera initialized successfully (640x480 capture -> 320x240 processing)")
+    return picam2
+
+def camera_capture_thread(picam2: Picamera2, frame_queue: Queue):
+    """
+    Optimized capture thread for headless operation with downsampling
+    Captures at 640x480 and downsamples to 320x240 for processing
+    """
+    print("Starting camera capture thread (with downsampling)...")
+    while True:
+        try:
+            # Capture at full resolution (640x480)
+            frame_rgb_full = picam2.capture_array("main")
+            
+            # Downsample to target processing resolution (320x240)
+            # This maintains the same processing workload while providing larger FOV
+            frame_rgb_downsampled = cv2.resize(frame_rgb_full, (320, 240), interpolation=cv2.INTER_AREA)
+            
+            if not frame_queue.full():
+                frame_queue.put_nowait(frame_rgb_downsampled)
+                
+        except Exception as e:
+            print(f"Error in capture thread: {e}")
+            break
+
+def video_file_thread(video_path: str, frame_queue: Queue):
+    """
+    Video file reading thread for MP4 processing
+    """
+    print(f"Starting video file thread for: {video_path}")
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        print(f"Error: Could not open video file {video_path}")
+        return
+    
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_delay = 1.0 / fps if fps > 0 else 1.0 / 30.0  # Default to 30 FPS if unknown
+    
+    print(f"Video FPS: {fps:.1f}, Frame delay: {frame_delay:.3f}s")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("End of video file reached")
+            break
+            
+        try:
+            # Resize frame to match processing resolution (320x240)
+            frame_resized = cv2.resize(frame, (320, 240))
+            
+            if not frame_queue.full():
+                frame_queue.put_nowait(frame_resized)
+            
+            # Maintain original video timing
+            time.sleep(frame_delay)
+                
+        except Exception as e:
+            print(f"Error in video file thread: {e}")
+            break
+    
+    cap.release()
+    print("Video file processing completed")
+
+def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False, debug_mask: any = None, distance_info: tuple = None) -> str:
+    """
+    Save annotated frame snapshot with tracking information
+    
+    Args:
+        frame: Annotated frame from tracker (always in BGR format after processing)
+        output_dir: Directory to save snapshots
+        frame_number: Current frame number
+        tracker_state: (cx, cy, radius, locked, bbox) from tracker
+        is_camera_feed: True if frame came from live camera
+        debug_mask: Optional debug mask to save alongside the frame
+        distance_info: Optional (abs_distance, x_offset, y_offset, center_x, center_y) tuple
+        
+    Returns:
+        Filename of saved snapshot
+    """
+    timestamp = datetime.now().strftime("%H%M%S")
+    cx, cy, radius, locked, bbox = tracker_state
+    status = "LOCKED" if locked else "LOST"
+    
+    # Add distance info to filename if available
+    if distance_info and locked:
+        abs_distance, x_offset, y_offset, _, _ = distance_info
+        filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}_d{abs_distance:.0f}px.jpg"
+    else:
+        filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}.jpg"
+    
+    filepath = os.path.join(output_dir, filename)
+    
+    # The frame from tracker is always in BGR format after processing
+    # cv2.imwrite() expects BGR format, so we save directly
+    # The color inversion issue was due to the tracker's automatic RGB->BGR conversion
+    # which is now handled correctly in the tracker itself
+    cv2.imwrite(filepath, frame)
+    
+    # Save debug mask if provided
+    if debug_mask is not None:
+        mask_filename = f"mask_f{frame_number:06d}_{timestamp}_{status}.jpg"
+        mask_filepath = os.path.join(output_dir, mask_filename)
+        cv2.imwrite(mask_filepath, debug_mask)
+        print(f"Debug mask saved: {mask_filename}")
+    
+    return filename
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Target Tracker with Live Streaming')
+    parser.add_argument('--source', type=str, help='MP4 video file to process instead of live camera')
+    parser.add_argument('--port', type=int, default=8080, help='HTTP streaming port (default: 8080)')
+    parser.add_argument('--no-stream', action='store_true', help='Disable streaming (headless only)')
+    return parser.parse_args()
+
+def main():
+    """
+    Main application loop for Pi Zero 2W with live streaming
+    """
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    print("=" * 60)
+    print("RASPBERRY PI ZERO 2W TARGET TRACKER WITH LIVE STREAMING")
+    print("=" * 60)
+    
+    if args.source:
+        print(f"Processing video file: {args.source}")
+        if not os.path.exists(args.source):
+            print(f"Error: Video file '{args.source}' not found!")
+            return
+    else:
+        print("Using live camera feed...")
+    
+    if not args.no_stream:
+        print(f"Live streaming enabled on port {args.port}")
+    else:
+        print("Streaming disabled - headless mode only")
+    
+    # Configuration for headless operation
+    output_dir = "pi_zero_output"
+    snapshot_interval = 5  # Save snapshot every N frames
+    status_interval = 150   # Print status every N frames
+    
+    # Enable diagnostic mode for detection debugging
+    diagnostic_mode = True
+    
+    # Disable all GUI-related config options
+    Config.SHOW_FPS = False
+    Config.SHOW_MASK = False
+    Config.DEBUG = False
+    Config.ENABLE_RESULT_LOGGING = False  # Disable the built-in logging
+    
+    # Configure for GREEN object tracking (default ranges)
+    Config.HSV_LOWER1 = (45, 60, 60)    # Green range (conservative)
+    Config.HSV_UPPER1 = (75, 255, 255)
+    Config.HSV_LOWER2 = (40, 50, 50)    # Extended green range
+    Config.HSV_UPPER2 = (80, 255, 255)
+    
+    # Allow larger green blobs (increase max detection radius for close objects)
+    Config.MAX_DETECTION_RADIUS = 200  # Increased from 100 to 200 pixels
+    
+    # Diagnostic: Relax detection parameters for better detection
+    if diagnostic_mode:
+        print("DIAGNOSTIC MODE ENABLED - Relaxing detection parameters for GREEN objects")
+        Config.MIN_AREA = 50  # Reduce from 200 to 50
+        Config.MIN_CIRCULARITY = 0.3  # Reduce from 0.6 to 0.3
+        Config.MAX_DETECTION_RADIUS = 250  # Allow very large green blobs when close to camera
+        # Green HSV ranges - green doesn't wrap around like red, so we use one main range
+        Config.HSV_LOWER1 = (40, 50, 50)    # Green range (hue 40-80)
+        Config.HSV_UPPER1 = (80, 255, 255)
+        Config.HSV_LOWER2 = (35, 40, 40)    # Extended green range for edge cases
+        Config.HSV_UPPER2 = (85, 255, 255)
+        snapshot_interval = 10  # More frequent snapshots for debugging
+    
+    print(f"Output directory: {output_dir}")
+    print(f"Snapshot interval: every {snapshot_interval} frames")
+    print(f"Status interval: every {status_interval} frames")
+    
+    # Step 1: Start streaming server if enabled
+    streaming_server = None
+    if not args.no_stream:
+        streaming_server = start_streaming_server(args.port)
+        if streaming_server is None:
+            print("Warning: Streaming server failed to start, continuing in headless mode")
+    
+    # Step 2: Initialize video source
+    picam2 = None
+    if args.source:
+        # Video file mode - no camera initialization needed
+        print("Video file mode - skipping camera initialization")
+    else:
+        # Live camera mode
+        try:
+            picam2 = initialize_camera_pi_zero()
+        except Exception as e:
+            print(f"Failed to initialize camera: {e}")
+            print("Make sure the camera is properly connected and enabled.")
+            return
+    
+    # Step 3: Setup frame queue and capture thread
+    frame_queue = Queue(maxsize=2)
+    
+    if args.source:
+        # Start video file thread
+        capture_thread = threading.Thread(
+            target=video_file_thread, 
+            args=(args.source, frame_queue), 
+            daemon=True
+        )
+    else:
+        # Start camera capture thread
+        capture_thread = threading.Thread(
+            target=camera_capture_thread, 
+            args=(picam2, frame_queue), 
+            daemon=True
+        )
+    
+    capture_thread.start()
+    
+    # Step 4: Initialize tracking components
+    video_source = args.source if args.source else 0  # 0 for camera, file path for video
+    tracker = TargetTracker(result_logger=None, video_source=video_source)  # No result logger
+    performance_tracker = HeadlessPerformanceTracker(output_dir)
+    
+    print("\nTarget tracking with live streaming started!")
+    print(f"Camera FOV: 640x480 (double resolution for larger field of view)")
+    print(f"Processing resolution: 320x240 (maintains Pi Zero workload)")
+    print(f"Target: Green objects, min area: {Config.MIN_AREA} pixels")
+    if diagnostic_mode:
+        print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
+        print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
+    
+    if streaming_server:
+        pi_ip = get_pi_ip_address()
+        print(f"\n🌐 LIVE STREAM ACCESS:")
+        print(f"📱 Browser: http://{pi_ip}:{args.port}")
+        print(f"🎥 VLC: http://{pi_ip}:{args.port}/stream")
+        print(f"📺 Direct URL: http://{pi_ip}:{args.port}/stream")
+    
+    print("\nPress Ctrl+C to stop...")
+    
+    try:
+        # Step 5: Main processing loop
+        while True:
+            # Get frame from capture queue
+            if frame_queue.empty():
+                # For video files, check if thread is still alive
+                if args.source and not capture_thread.is_alive():
+                    print("Video file processing completed")
+                    break
+                time.sleep(0.001)
+                continue
+                
+            frame_rgb = frame_queue.get()
+            
+            # Convert frame format if needed
+            if args.source:
+                # Video file frames are already in BGR format
+                frame_bgr = frame_rgb
+            else:
+                # Camera frames are in RGB format, convert to BGR
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            
+            # Process frame through tracker pipeline
+            annotated_frame = tracker.process_frame(frame_bgr)
+            
+            # Update streaming server with latest frame
+            if streaming_server:
+                streaming_server.current_frame = annotated_frame.copy()
+            
+            # Get tracking state with distance information
+            cx, cy, radius, locked, bbox, distance_info = tracker.get_state_with_distance()
+            abs_distance, x_offset, y_offset, frame_center_x, frame_center_y = distance_info
+            has_detection = (cx != -1 and cy != -1)
+            
+            # Update performance metrics
+            performance_tracker.update_frame_metrics(
+                has_detection, locked, tracker.lock_duration, distance_info
+            )
+            
+            # Save periodic snapshots with debug information
+            if tracker.frame_count % snapshot_interval == 0:
+                debug_mask = tracker.get_debug_mask() if diagnostic_mode else None
+                filename = save_snapshot(
+                    annotated_frame, output_dir, tracker.frame_count, 
+                    (cx, cy, radius, locked, bbox), is_camera_feed=not args.source,
+                    debug_mask=debug_mask, distance_info=distance_info
+                )
+                print(f"Snapshot saved: {filename}")
+                
+                # Print distance information if target is detected
+                if has_detection and locked:
+                    direction_desc = tracker.get_directional_description(x_offset, y_offset)
+                    print(f"  Distance: {abs_distance:.1f}px from center ({frame_center_x}, {frame_center_y})")
+                    print(f"  Position: {direction_desc}")
+                    print(f"  Offset: ({x_offset:+d}, {y_offset:+d}) pixels")
+                
+                # Diagnostic: Print detailed detection info
+                if diagnostic_mode:
+                    mask_stats = cv2.countNonZero(debug_mask) if debug_mask is not None else 0
+                    print(f"  Debug info - Mask pixels: {mask_stats}, Detection: {has_detection}")
+                    print(f"  HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
+                    print(f"  Min area: {Config.MIN_AREA}, Min circularity: {Config.MIN_CIRCULARITY}")
+            
+            # Print status periodically
+            if tracker.frame_count % status_interval == 0:
+                stats = performance_tracker.get_current_stats()
+                print(f"\n--- Frame {tracker.frame_count} Status ---")
+                print(f"FPS: {stats['avg_fps']:.1f}")
+                print(f"Detection Rate: {stats['detection_rate']:.1f}%")
+                print(f"Lock Rate: {stats['lock_rate']:.1f}%")
+                print(f"Lock Sessions: {stats['lock_sessions']}")
+                if locked:
+                    print(f"Current Lock: {stats['current_lock_duration']} frames")
+                    print(f"Target: ({cx}, {cy}) radius={radius}")
+                    direction_desc = tracker.get_directional_description(x_offset, y_offset)
+                    print(f"Distance: {abs_distance:.1f}px from center - {direction_desc}")
+                    if stats['distance_samples'] > 0:
+                        print(f"Avg Distance: {stats['avg_distance']:.1f}px (min: {stats['min_distance']:.1f}, max: {stats['max_distance']:.1f})")
+                else:
+                    print("Status: TARGET LOST")
+                if streaming_server:
+                    pi_ip = get_pi_ip_address()
+                    print(f"Stream: http://{pi_ip}:{args.port}")
+                print("-" * 35)
+    
+    except KeyboardInterrupt:
+        print("\nInterrupted by user (Ctrl+C)")
+    
+    finally:
+        # Step 6: Cleanup and final reporting
+        print("Shutting down tracker and streaming...")
+        
+        # Save final performance report
+        final_report = performance_tracker.save_final_report()
+        
+        # Print final summary
+        print("\n" + "=" * 50)
+        print("FINAL PERFORMANCE SUMMARY")
+        print("=" * 50)
+        metrics = final_report['performance_metrics']
+        print(f"Total Frames: {metrics['total_frames_processed']}")
+        print(f"Average FPS: {metrics['average_fps']:.1f}")
+        print(f"Detection Rate: {metrics['detection_rate_percent']:.1f}%")
+        print(f"Lock Rate: {metrics['lock_rate_percent']:.1f}%")
+        print(f"Lock Sessions: {metrics['total_lock_sessions']}")
+        print(f"Session Duration: {final_report['session_info']['duration_seconds']:.1f}s")
+        
+        # Distance statistics
+        distance_stats = metrics['distance_statistics']
+        if distance_stats['distance_samples_count'] > 0:
+            print(f"Distance Stats: Avg={distance_stats['average_distance_px']:.1f}px, Min={distance_stats['min_distance_px']:.1f}px, Max={distance_stats['max_distance_px']:.1f}px")
+        
+        print(f"Output Directory: {output_dir}")
+        
+        # Stop camera if it was used
+        if picam2:
+            picam2.stop()
+            print("Camera stopped")
+        
+        # Stop streaming server
+        if streaming_server:
+            streaming_server.shutdown()
+            print("Streaming server stopped")
+        
+        print("Target tracker with streaming stopped successfully!")
+
+if __name__ == "__main__":
+    main() 
