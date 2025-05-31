@@ -103,7 +103,7 @@ def main():
     
     # Step 3: Initialize tracking components
     result_logger = ResultLogger("macOS_Webcam") if Config.ENABLE_RESULT_LOGGING else None
-    tracker = TargetTracker(result_logger)
+    tracker = TargetTracker(result_logger, 0)  # 0 indicates camera source
     
     # Step 4: Create display windows
     cv2.namedWindow("macOS Webcam Tracker", cv2.WINDOW_NORMAL)
@@ -120,6 +120,7 @@ def main():
     print("  's' - Save current frame snapshot")
     print("  'm' - Toggle mask view (debug)")
     print("  'b' - Toggle bounding box display")
+    print("  'c' - Toggle color format (RGB/BGR)")
     print("  'd' - Toggle debug mode")
     print("  'f' - Toggle FPS display")
     print("  'r' - Reset tracking")
@@ -188,6 +189,13 @@ def main():
                 # Toggle bounding box display
                 Config.SHOW_BOUNDING_BOX = not Config.SHOW_BOUNDING_BOX
                 print(f"Bounding box display: {'ON' if Config.SHOW_BOUNDING_BOX else 'OFF'}")
+            elif key == ord('c'):
+                # Toggle color format conversion
+                tracker.needs_rgb_to_bgr_conversion = not tracker.needs_rgb_to_bgr_conversion
+                tracker.color_format_detected = True  # Mark as manually set
+                format_str = "RGB->BGR" if tracker.needs_rgb_to_bgr_conversion else "BGR (no conversion)"
+                print(f"🔴 Color format manually set to: {format_str}")
+                print(f"💡 If this fixes the issue, you can set Config.FORCE_COLOR_FORMAT = {tracker.needs_rgb_to_bgr_conversion} to make it permanent")
             elif key == ord('d'):
                 # Toggle debug mode
                 Config.DEBUG = not Config.DEBUG
@@ -203,7 +211,7 @@ def main():
                 # Reset tracking
                 print("Resetting tracker state...")
                 # Re-initialize tracker to reset state
-                tracker = TargetTracker(result_logger)
+                tracker = TargetTracker(result_logger, 0)  # 0 indicates camera source
                 print("Tracker reset complete")
     
     except KeyboardInterrupt:

@@ -104,6 +104,8 @@ When running with display:
 - `q`: Quit the application
 - `s`: Save current frame as image
 - `m`: Toggle color mask visualization
+- `b`: Toggle bounding box display
+- `c`: Toggle color format (RGB/BGR) - fixes blue vs red tracking issues
 - `d`: Toggle debug mode
 
 ## Configuration
@@ -185,6 +187,13 @@ The system is pre-configured for Pi performance:
 - Check if camera is connected and not used by another application
 - Try different camera indices (0, 1, 2...)
 - Ensure video file path is correct
+
+**Tracking blue objects instead of red objects**
+- This is a camera color format issue (RGB vs BGR)
+- The system now auto-detects and fixes this automatically
+- If auto-detection fails, press 'c' during tracking to toggle color format
+- For permanent fix, set `Config.FORCE_COLOR_FORMAT = True` (for RGB cameras) or `False` (for BGR cameras)
+- Run `python test_color_fix.py` to diagnose and test the fix
 
 **Poor detection performance**
 - Adjust HSV thresholds in Config class

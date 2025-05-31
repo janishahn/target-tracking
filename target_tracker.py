@@ -57,6 +57,10 @@ class Config:
     SHOW_FPS = True
     SHOW_BOUNDING_BOX = True    # Show bounding box instead of just circle
     
+    # Color format override (set to force specific behavior)
+    # None = auto-detect, True = force RGB->BGR conversion, False = force BGR (no conversion)
+    FORCE_COLOR_FORMAT = None
+    
     # Output configuration
     OUTPUT_CSV = False
     UDP_OUTPUT = False
@@ -314,7 +318,7 @@ class TargetTracker:
     Enhanced implementation following the detailed specification.
     """
     
-    def __init__(self, result_logger: Optional[ResultLogger] = None):
+    def __init__(self, result_logger: Optional[ResultLogger] = None, video_source=None):
         # Tracking state variables
         self.last_centroid = None
         self.smoothed_centroid = None
@@ -335,10 +339,17 @@ class TargetTracker:
         self.frame_height = Config.FRAME_HEIGHT
         self.alpha = Config.SMOOTHING_ALPHA
         
+        # Camera color format detection
+        self.video_source = video_source
+        self.is_camera_source = isinstance(video_source, int) or video_source == 0
+        self.color_format_detected = False
+        self.needs_rgb_to_bgr_conversion = False
+        
         # Pre-allocated buffers for performance optimization
         self.hsv_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
         self.mask_prealloc = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
         self.bgr_frame_prealloc = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+        self.rgb_conversion_buffer = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
         
         # Precompute morphological kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
@@ -386,20 +397,106 @@ class TargetTracker:
         self.roi_enabled = False
         self.roi_rect = (0, 0, self.frame_width, self.frame_height)  # x, y, w, h
         self.frames_since_full_search = 0
+    
+    def _detect_camera_color_format(self, frame: np.ndarray) -> bool:
+        """
+        Detect if camera provides RGB or BGR frames by analyzing color distribution.
+        This method assumes we're looking for red objects and checks which format
+        produces better red detection in HSV space.
         
+        Args:
+            frame: Raw frame from camera
+            
+        Returns:
+            True if RGB->BGR conversion is needed, False if frame is already BGR
+        """
+        if self.color_format_detected:
+            return self.needs_rgb_to_bgr_conversion
+        
+        # Check for manual override first
+        if Config.FORCE_COLOR_FORMAT is not None:
+            self.needs_rgb_to_bgr_conversion = Config.FORCE_COLOR_FORMAT
+            self.color_format_detected = True
+            format_str = "RGB->BGR" if Config.FORCE_COLOR_FORMAT else "BGR (no conversion)"
+            print(f"🔴 Camera color format FORCED to: {format_str}")
+            return self.needs_rgb_to_bgr_conversion
+        
+        # Only perform detection for camera sources
+        if not self.is_camera_source:
+            self.color_format_detected = True
+            self.needs_rgb_to_bgr_conversion = False
+            return False
+        
+        # Resize frame for analysis
+        test_frame = cv2.resize(frame, (self.frame_width, self.frame_height))
+        
+        # Test 1: Assume frame is BGR (no conversion)
+        hsv_bgr = cv2.cvtColor(test_frame, cv2.COLOR_BGR2HSV)
+        mask_bgr_1 = cv2.inRange(hsv_bgr, self.hsv_ranges[0][0], self.hsv_ranges[0][1])
+        mask_bgr_2 = cv2.inRange(hsv_bgr, self.hsv_ranges[1][0], self.hsv_ranges[1][1])
+        mask_bgr = cv2.bitwise_or(mask_bgr_1, mask_bgr_2)
+        red_pixels_bgr = cv2.countNonZero(mask_bgr)
+        
+        # Test 2: Assume frame is RGB (convert to BGR first)
+        test_frame_converted = cv2.cvtColor(test_frame, cv2.COLOR_RGB2BGR)
+        hsv_rgb = cv2.cvtColor(test_frame_converted, cv2.COLOR_BGR2HSV)
+        mask_rgb_1 = cv2.inRange(hsv_rgb, self.hsv_ranges[0][0], self.hsv_ranges[0][1])
+        mask_rgb_2 = cv2.inRange(hsv_rgb, self.hsv_ranges[1][0], self.hsv_ranges[1][1])
+        mask_rgb = cv2.bitwise_or(mask_rgb_1, mask_rgb_2)
+        red_pixels_rgb = cv2.countNonZero(mask_rgb)
+        
+        # Determine which format produces more red pixels
+        # Add a threshold to avoid false positives from noise
+        min_threshold = 50  # Minimum pixels to consider a valid detection
+        
+        if red_pixels_rgb > red_pixels_bgr and red_pixels_rgb > min_threshold:
+            self.needs_rgb_to_bgr_conversion = True
+            print(f"🔴 Camera color format detected: RGB (converting to BGR)")
+            print(f"  RGB->BGR conversion: {red_pixels_rgb} red pixels")
+            print(f"  Direct BGR: {red_pixels_bgr} red pixels")
+            print(f"  ✅ This should fix blue objects being tracked instead of red!")
+        elif red_pixels_bgr > min_threshold:
+            self.needs_rgb_to_bgr_conversion = False
+            print(f"🔴 Camera color format detected: BGR (no conversion needed)")
+            print(f"  Direct BGR: {red_pixels_bgr} red pixels")
+            print(f"  RGB->BGR conversion: {red_pixels_rgb} red pixels")
+        else:
+            # Fallback: if no clear winner, assume RGB format (common on macOS)
+            self.needs_rgb_to_bgr_conversion = True
+            print(f"🔴 Camera color format unclear - defaulting to RGB->BGR conversion")
+            print(f"  RGB->BGR conversion: {red_pixels_rgb} red pixels")
+            print(f"  Direct BGR: {red_pixels_bgr} red pixels")
+            print(f"  ⚠️  Warning: No clear red objects detected. Place a red object in view for better detection.")
+            print(f"  💡 If tracking still fails, try pressing 'r' to reset with a red object visible.")
+        
+        self.color_format_detected = True
+        return self.needs_rgb_to_bgr_conversion
+    
     def preprocess(self, frame: np.ndarray) -> np.ndarray:
         """
-        Preprocess raw BGR frame from camera or video.
+        Preprocess raw frame from camera or video with automatic color format detection.
         Uses pre-allocated buffer to avoid memory allocation overhead.
         
         Args:
-            frame: Raw BGR frame
+            frame: Raw frame (could be RGB or BGR depending on source)
             
         Returns:
-            Preprocessed frame (resized and optionally blurred) - pre-allocated buffer
+            Preprocessed BGR frame (resized and optionally blurred) - pre-allocated buffer
         """
+        # Detect and handle color format for camera sources
+        if self.is_camera_source and not self.color_format_detected:
+            self._detect_camera_color_format(frame)
+        
+        # Apply color conversion if needed
+        if self.needs_rgb_to_bgr_conversion:
+            # Convert RGB to BGR using pre-allocated buffer
+            cv2.cvtColor(frame, cv2.COLOR_RGB2BGR, dst=self.rgb_conversion_buffer)
+            source_frame = self.rgb_conversion_buffer
+        else:
+            source_frame = frame
+        
         # Resize frame to configured dimensions using pre-allocated buffer
-        cv2.resize(frame, (self.frame_width, self.frame_height), dst=self.bgr_frame_prealloc)
+        cv2.resize(source_frame, (self.frame_width, self.frame_height), dst=self.bgr_frame_prealloc)
         
         # Optional Gaussian blur for noise reduction (only in debug mode)
         if Config.DEBUG:
@@ -896,7 +993,7 @@ def main():
         print(f"Result logging enabled. Results will be saved to: {Config.LOG_DIRECTORY}/")
     
     # Step 3: Instantiate detector
-    detector = TargetTracker(result_logger)
+    detector = TargetTracker(result_logger, Config.VIDEO_SOURCE)
     
     # Step 4: Create window if not headless
     if not args.no_display:
@@ -905,7 +1002,7 @@ def main():
             cv2.namedWindow("Target Tracker - Color Mask", cv2.WINDOW_NORMAL)
     
     print("Target Tracker started. Main window shows tracking with bounding box.")
-    print("Controls: 'q'=quit, 's'=save frame, 'm'=toggle mask view, 'b'=toggle bounding box")
+    print("Controls: 'q'=quit, 's'=save frame, 'm'=toggle mask view, 'b'=toggle bounding box, 'c'=toggle color format")
     print(f"Target: Red objects with area >= {Config.MIN_AREA} pixels")
     print(f"Frame size: {Config.FRAME_WIDTH}x{Config.FRAME_HEIGHT}")
     print(f"Bounding box display: {'ON' if Config.SHOW_BOUNDING_BOX else 'OFF'}")
@@ -991,6 +1088,16 @@ def main():
                     # Toggle bounding box display
                     Config.SHOW_BOUNDING_BOX = not Config.SHOW_BOUNDING_BOX
                     print(f"Bounding box display: {'ON' if Config.SHOW_BOUNDING_BOX else 'OFF'}")
+                elif key == ord('c'):
+                    # Toggle color format conversion
+                    if detector.is_camera_source:
+                        detector.needs_rgb_to_bgr_conversion = not detector.needs_rgb_to_bgr_conversion
+                        detector.color_format_detected = True  # Mark as manually set
+                        format_str = "RGB->BGR" if detector.needs_rgb_to_bgr_conversion else "BGR (no conversion)"
+                        print(f"🔴 Color format manually set to: {format_str}")
+                        print(f"💡 If this fixes the issue, you can set Config.FORCE_COLOR_FORMAT = {detector.needs_rgb_to_bgr_conversion} to make it permanent")
+                    else:
+                        print("Color format toggle only available for camera sources")
     
     except KeyboardInterrupt:
         print("\nInterrupted by user")

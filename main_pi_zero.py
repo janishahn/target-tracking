@@ -360,7 +360,8 @@ def main():
     capture_thread.start()
     
     # Step 3: Initialize tracking components
-    tracker = TargetTracker(result_logger=None)  # No result logger
+    video_source = args.source if args.source else 0  # 0 for camera, file path for video
+    tracker = TargetTracker(result_logger=None, video_source=video_source)  # No result logger
     performance_tracker = HeadlessPerformanceTracker(output_dir)
     
     print("\nHeadless tracking started!")
