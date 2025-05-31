@@ -392,8 +392,7 @@ def main():
                 frame_bgr = frame_rgb
             else:
                 # Camera frames are in RGB format, convert to BGR
-                # frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-                frame_bgr = frame_rgb
+                frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             
             # Process frame through tracker pipeline
             annotated_frame = tracker.process_frame(frame_bgr)
