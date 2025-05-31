@@ -13,6 +13,8 @@ import argparse
 import json
 from datetime import datetime
 from typing import Tuple, Optional, List, Dict, Any
+from threading import Thread
+from queue import Queue
 
 # =============================================================================
 # CONFIGURATION & PARAMETERS
@@ -302,23 +304,6 @@ class ResultLogger:
         print(f"JSON data saved: {filename}")
 
 # =============================================================================
-# HELPER FUNCTIONS
-# =============================================================================
-
-def circularity_of(contour) -> float:
-    """
-    Calculate circularity of a contour.
-    Circularity = (4π × area) / (perimeter²)
-    Returns value between 0 and 1, where 1 is a perfect circle.
-    """
-    area = cv2.contourArea(contour)
-    perimeter = cv2.arcLength(contour, True)
-    if perimeter < 1e-6:  # Avoid division by zero
-        return 0.0
-    circularity = (4 * np.pi * area) / (perimeter ** 2)
-    return min(circularity, 1.0)  # Cap at 1.0
-
-# =============================================================================
 # TARGET TRACKER CLASS (Enhanced Implementation)
 # =============================================================================
 
@@ -349,8 +334,37 @@ class TargetTracker:
         self.frame_height = Config.FRAME_HEIGHT
         self.alpha = Config.SMOOTHING_ALPHA
         
+        # Pre-allocated buffers for performance optimization
+        self.hsv_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+        self.mask_prealloc = np.zeros((self.frame_height, self.frame_width), dtype=np.uint8)
+        self.bgr_frame_prealloc = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
+        
         # Precompute morphological kernel
         self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        
+        # Create SimpleBlobDetector for efficient blob detection
+        params = cv2.SimpleBlobDetector_Params()
+        
+        # Configure thresholding for binary mask input
+        params.minThreshold = 127
+        params.maxThreshold = 255
+        params.thresholdStep = 10
+        
+        # Area filtering
+        params.filterByArea = True
+        params.minArea = Config.MIN_AREA
+        params.maxArea = (Config.MAX_DETECTION_RADIUS ** 2) * np.pi  # approximate circle area
+        
+        # Circularity filtering
+        params.filterByCircularity = True
+        params.minCircularity = Config.MIN_CIRCULARITY
+        
+        # Disable other filters for now
+        params.filterByInertia = False
+        params.filterByConvexity = False
+        params.filterByColor = False
+        
+        self.blob_detector = cv2.SimpleBlobDetector_create(params)
         
         # HSV ranges for red color detection (handles wraparound)
         self.hsv_ranges = [
@@ -367,40 +381,75 @@ class TargetTracker:
         # Result logging
         self.result_logger = result_logger
         
+        # ROI-based search optimization
+        self.roi_enabled = False
+        self.roi_rect = (0, 0, self.frame_width, self.frame_height)  # x, y, w, h
+        self.frames_since_full_search = 0
+        
     def preprocess(self, frame: np.ndarray) -> np.ndarray:
         """
         Preprocess raw BGR frame from camera or video.
+        Uses pre-allocated buffer to avoid memory allocation overhead.
         
         Args:
             frame: Raw BGR frame
             
         Returns:
-            Preprocessed frame (resized and optionally blurred)
+            Preprocessed frame (resized and optionally blurred) - pre-allocated buffer
         """
-        # Resize frame to configured dimensions
-        frame_resized = cv2.resize(frame, (self.frame_width, self.frame_height))
+        # Resize frame to configured dimensions using pre-allocated buffer
+        cv2.resize(frame, (self.frame_width, self.frame_height), dst=self.bgr_frame_prealloc)
         
         # Optional Gaussian blur for noise reduction (only in debug mode)
         if Config.DEBUG:
-            frame_blur = cv2.GaussianBlur(frame_resized, (5, 5), 0)
-            return frame_blur
-        else:
-            return frame_resized
+            cv2.GaussianBlur(self.bgr_frame_prealloc, (5, 5), 0, dst=self.bgr_frame_prealloc)
+        
+        return self.bgr_frame_prealloc
     
     def compute_mask(self, hsv_frame: np.ndarray) -> np.ndarray:
         """
         Create binary mask for target color detection using HSV thresholding.
         Handles red color which wraps around in HSV space.
+        Uses pre-allocated buffer to avoid memory allocation overhead.
         
         Args:
             hsv_frame: HSV converted frame
             
         Returns:
-            Binary mask with target pixels as white (255)
+            Binary mask with target pixels as white (255) - pre-allocated buffer
+        """
+        # Create first mask for red range using pre-allocated buffer
+        cv2.inRange(hsv_frame, self.hsv_ranges[0][0], self.hsv_ranges[0][1], dst=self.mask_prealloc)
+        
+        # Create second mask for red range (handles HSV wraparound)
+        mask2 = cv2.inRange(hsv_frame, self.hsv_ranges[1][0], self.hsv_ranges[1][1])
+        
+        # Combine masks using pre-allocated buffer
+        cv2.bitwise_or(self.mask_prealloc, mask2, dst=self.mask_prealloc)
+        
+        # Morphological operations to clean up noise (in-place)
+        # Open: removes small blobs
+        cv2.morphologyEx(self.mask_prealloc, cv2.MORPH_OPEN, self.morph_kernel, dst=self.mask_prealloc)
+        
+        # Close: fills small holes (optional)
+        cv2.morphologyEx(self.mask_prealloc, cv2.MORPH_CLOSE, self.morph_kernel, dst=self.mask_prealloc)
+        
+        return self.mask_prealloc
+    
+    def _compute_roi_mask(self, hsv_roi: np.ndarray) -> np.ndarray:
+        """
+        Create binary mask for ROI region using HSV thresholding.
+        This is a separate method to handle ROI-specific masking without buffer conflicts.
+        
+        Args:
+            hsv_roi: HSV converted ROI region
+            
+        Returns:
+            Binary mask for ROI with target pixels as white (255)
         """
         # Create masks for both red ranges (handles HSV wraparound)
-        mask1 = cv2.inRange(hsv_frame, self.hsv_ranges[0][0], self.hsv_ranges[0][1])
-        mask2 = cv2.inRange(hsv_frame, self.hsv_ranges[1][0], self.hsv_ranges[1][1])
+        mask1 = cv2.inRange(hsv_roi, self.hsv_ranges[0][0], self.hsv_ranges[0][1])
+        mask2 = cv2.inRange(hsv_roi, self.hsv_ranges[1][0], self.hsv_ranges[1][1])
         
         # Combine masks
         mask = cv2.bitwise_or(mask1, mask2)
@@ -416,7 +465,7 @@ class TargetTracker:
     
     def find_candidate(self, mask: np.ndarray) -> Optional[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], np.ndarray]]:
         """
-        Find the best target candidate from binary mask.
+        Find the best target candidate from binary mask using SimpleBlobDetector.
         
         Args:
             mask: Binary mask (uint8, 0 or 255)
@@ -424,51 +473,31 @@ class TargetTracker:
         Returns:
             Best candidate as ((x, y), radius, area, bbox, contour) or None if no valid candidate
             bbox format: (x, y, w, h) - top-left corner and dimensions
+            Note: contour is None since SimpleBlobDetector doesn't provide contours
         """
-        # Find contours
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Use SimpleBlobDetector for efficient blob detection
+        keypoints = self.blob_detector.detect(mask)
         
-        if not contours:
+        if not keypoints:
             return None
         
-        candidates = []
+        # Select the largest keypoint by size (diameter)
+        best_kp = max(keypoints, key=lambda kp: kp.size)
         
-        # Evaluate each contour
-        for cnt in contours:
-            # Check minimum area
-            area = cv2.contourArea(cnt)
-            if area < Config.MIN_AREA:
-                continue
-            
-            # Check circularity
-            circularity = circularity_of(cnt)
-            if circularity < Config.MIN_CIRCULARITY:
-                continue
-            
-            # Get enclosing circle
-            (x, y), radius = cv2.minEnclosingCircle(cnt)
-            radius = int(radius)
-            
-            # Check maximum radius
-            if radius > Config.MAX_DETECTION_RADIUS:
-                continue
-            
-            # Get bounding box
-            bbox_x, bbox_y, bbox_w, bbox_h = cv2.boundingRect(cnt)
-            
-            # Add to candidates list
-            candidates.append((cnt, area, circularity, (int(x), int(y), radius), (bbox_x, bbox_y, bbox_w, bbox_h)))
+        # Extract blob properties
+        x, y = best_kp.pt
+        radius = best_kp.size / 2.0
+        area_est = np.pi * radius * radius
         
-        if not candidates:
-            return None
-        
-        # Sort by area (descending) and pick the largest
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        best_candidate = candidates[0]
+        # Create bounding box from circle
+        bbox_x = int(x - radius)
+        bbox_y = int(y - radius)
+        bbox_w = int(2 * radius)
+        bbox_h = int(2 * radius)
         
         # Return (centroid, radius, area, bbox, contour)
-        contour, area, _, (x, y, radius), bbox = best_candidate
-        return ((x, y), radius, area, bbox, contour)
+        # Note: contour is None since SimpleBlobDetector doesn't provide contours
+        return ((int(x), int(y)), int(radius), area_est, (bbox_x, bbox_y, bbox_w, bbox_h), None)
     
     def update_track(self, candidate: Optional[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], np.ndarray]]):
         """
@@ -519,6 +548,17 @@ class TargetTracker:
                     self.lock_duration = 1
                 else:
                     self.lock_duration += 1
+                
+                # Update ROI for next frame
+                center_x, center_y = int(self.smoothed_centroid[0]), int(self.smoothed_centroid[1])
+                half_win = Config.SEARCH_WINDOW_SIZE
+                new_x = max(0, center_x - half_win)
+                new_y = max(0, center_y - half_win)
+                new_w = min(self.frame_width - new_x, 2 * half_win)
+                new_h = min(self.frame_height - new_y, 2 * half_win)
+                self.roi_rect = (new_x, new_y, new_w, new_h)
+                self.roi_enabled = True
+                self.frames_since_full_search = 0
                     
             else:
                 # Detection is far from previous centroid
@@ -537,9 +577,21 @@ class TargetTracker:
                     self.missing_frames = 0
                     self.locked = True
                     self.lock_duration = 1
+                    
+                    # Update ROI for reacquisition
+                    center_x, center_y = int(self.smoothed_centroid[0]), int(self.smoothed_centroid[1])
+                    half_win = Config.SEARCH_WINDOW_SIZE
+                    new_x = max(0, center_x - half_win)
+                    new_y = max(0, center_y - half_win)
+                    new_w = min(self.frame_width - new_x, 2 * half_win)
+                    new_h = min(self.frame_height - new_y, 2 * half_win)
+                    self.roi_rect = (new_x, new_y, new_w, new_h)
+                    self.roi_enabled = True
+                    self.frames_since_full_search = 0
                 else:
                     # Ignore this detection, increment missing frames
                     self.missing_frames += 1
+                    self.frames_since_full_search += 1
                     if self.missing_frames > Config.MAX_MISSING_FRAMES:
                         self.locked = False
                         self.lock_duration = 0
@@ -548,9 +600,11 @@ class TargetTracker:
                         self.last_bbox = None
                         self.smoothed_bbox = None
                         self.last_contour = None
+                        self.roi_enabled = False
         else:
             # No candidate this frame
             self.missing_frames += 1
+            self.frames_since_full_search += 1
             if self.missing_frames > Config.MAX_MISSING_FRAMES:
                 self.locked = False
                 self.lock_duration = 0
@@ -559,6 +613,7 @@ class TargetTracker:
                 self.last_bbox = None
                 self.smoothed_bbox = None
                 self.last_contour = None
+                self.roi_enabled = False
     
     def _is_within_search_window(self, new_centroid: Tuple[int, int]) -> bool:
         """Check if new detection is within search window of last known position"""
@@ -591,15 +646,15 @@ class TargetTracker:
     
     def annotate(self, frame: np.ndarray) -> np.ndarray:
         """
-        Add visualization overlay to frame.
+        Add visualization overlay to frame (in-place for performance).
         
         Args:
-            frame: BGR frame to annotate
+            frame: BGR frame to annotate (will be modified in-place)
             
         Returns:
-            Annotated frame
+            Same frame object with annotations added
         """
-        vis_frame = frame.copy()
+        frame_for_display = frame  # No copy - annotate in-place
         cx, cy, radius, locked, bbox = self.get_state()
         
         if locked:
@@ -607,20 +662,20 @@ class TargetTracker:
             
             if Config.SHOW_BOUNDING_BOX:
                 # Draw bounding box
-                cv2.rectangle(vis_frame, (bbox_x, bbox_y), (bbox_x + bbox_w, bbox_y + bbox_h), (0, 255, 0), 2)
+                cv2.rectangle(frame_for_display, (bbox_x, bbox_y), (bbox_x + bbox_w, bbox_y + bbox_h), (0, 255, 0), 2)
                 
                 # Draw target circle (optional, for reference)
-                cv2.circle(vis_frame, (cx, cy), radius, (0, 255, 0), 1)
+                cv2.circle(frame_for_display, (cx, cy), radius, (0, 255, 0), 1)
             else:
                 # Draw target circle only
-                cv2.circle(vis_frame, (cx, cy), radius, (0, 255, 0), 2)
+                cv2.circle(frame_for_display, (cx, cy), radius, (0, 255, 0), 2)
             
             # Draw crosshairs
-            cv2.line(vis_frame, (cx-10, cy), (cx+10, cy), (0, 255, 0), 2)
-            cv2.line(vis_frame, (cx, cy-10), (cx, cy+10), (0, 255, 0), 2)
+            cv2.line(frame_for_display, (cx-10, cy), (cx+10, cy), (0, 255, 0), 2)
+            cv2.line(frame_for_display, (cx, cy-10), (cx, cy+10), (0, 255, 0), 2)
             
             # Draw center point
-            cv2.circle(vis_frame, (cx, cy), 2, (0, 255, 0), -1)
+            cv2.circle(frame_for_display, (cx, cy), 2, (0, 255, 0), -1)
             
             # Add bounding box coordinates at top-left corner of the box (only if showing bounding box)
             if Config.SHOW_BOUNDING_BOX:
@@ -631,33 +686,33 @@ class TargetTracker:
                 
                 # Add background rectangle for better text visibility
                 text_size = cv2.getTextSize(bbox_coord_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-                cv2.rectangle(vis_frame, (text_x, text_y - text_size[1] - 2), 
+                cv2.rectangle(frame_for_display, (text_x, text_y - text_size[1] - 2), 
                              (text_x + text_size[0] + 4, text_y + 2), (0, 0, 0), -1)
                 
                 # Draw the coordinate text
-                cv2.putText(vis_frame, bbox_coord_text, (text_x + 2, text_y), 
+                cv2.putText(frame_for_display, bbox_coord_text, (text_x + 2, text_y), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
                 
                 # Add bounding box dimensions next to coordinates
                 bbox_size_text = f"{bbox_w}x{bbox_h}"
-                cv2.putText(vis_frame, bbox_size_text, (text_x + 2, text_y + 15), 
+                cv2.putText(frame_for_display, bbox_size_text, (text_x + 2, text_y + 15), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
             
             # Add text info (status)
             info_text = f"LOCKED ({self.lock_duration} frames)"
-            cv2.putText(vis_frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(frame_for_display, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
             # Show center coordinates
             coord_text = f"Center: ({cx}, {cy})"
-            cv2.putText(vis_frame, coord_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame_for_display, coord_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             # Show bounding box info
             bbox_info_text = f"BBox: ({bbox_x},{bbox_y}) {bbox_w}x{bbox_h}"
-            cv2.putText(vis_frame, bbox_info_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame_for_display, bbox_info_text, (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         else:
             # Target lost
             status_text = "TARGET LOST"
-            cv2.putText(vis_frame, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(frame_for_display, status_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
         # Show FPS
         if Config.SHOW_FPS:
@@ -668,15 +723,29 @@ class TargetTracker:
             self.last_time = current_time
             
             fps_text = f"FPS: {self.current_fps:.1f}"
-            cv2.putText(vis_frame, fps_text, (10, vis_frame.shape[0] - 10), 
+            cv2.putText(frame_for_display, fps_text, (10, frame_for_display.shape[0] - 10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         # Show frame count
         frame_text = f"Frame: {self.frame_count}"
-        cv2.putText(vis_frame, frame_text, (10, vis_frame.shape[0] - 30), 
+        cv2.putText(frame_for_display, frame_text, (10, frame_for_display.shape[0] - 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
-        return vis_frame
+        # Show ROI status and draw ROI rectangle if enabled
+        if self.roi_enabled:
+            roi_text = f"ROI: {self.roi_rect[2]}x{self.roi_rect[3]}"
+            cv2.putText(frame_for_display, roi_text, (10, frame_for_display.shape[0] - 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            
+            # Draw ROI rectangle
+            x, y, w, h = self.roi_rect
+            cv2.rectangle(frame_for_display, (x, y), (x + w, y + h), (0, 255, 255), 1)
+        else:
+            roi_text = "ROI: FULL"
+            cv2.putText(frame_for_display, roi_text, (10, frame_for_display.shape[0] - 50), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        
+        return frame_for_display
     
     def process_frame(self, frame: np.ndarray) -> np.ndarray:
         """
@@ -694,11 +763,33 @@ class TargetTracker:
         # Step 1: Preprocess frame
         frame_proc = self.preprocess(frame)
         
-        # Step 2: Convert to HSV
-        hsv = cv2.cvtColor(frame_proc, cv2.COLOR_BGR2HSV)
-        
-        # Step 3: Compute mask
-        mask = self.compute_mask(hsv)
+        # Step 2: Two-stage masking (ROI-based or full-frame)
+        if self.roi_enabled and self.frames_since_full_search < Config.MAX_MISSING_FRAMES:
+            # Stage A: ROI-based search
+            x, y, w, h = self.roi_rect
+            
+            # Extract ROI from BGR frame
+            sub_bgr = self.bgr_frame_prealloc[y:y+h, x:x+w]
+            
+            # Convert ROI to HSV
+            sub_hsv = cv2.cvtColor(sub_bgr, cv2.COLOR_BGR2HSV)
+            
+            # Compute mask for ROI only using separate method
+            mask_roi = self._compute_roi_mask(sub_hsv)
+            
+            # Create full mask with zeros and copy ROI mask back
+            self.mask_prealloc[:] = 0
+            self.mask_prealloc[y:y+h, x:x+w] = mask_roi
+            
+            mask = self.mask_prealloc
+        else:
+            # Stage A: Full-frame search
+            cv2.cvtColor(frame_proc, cv2.COLOR_BGR2HSV, dst=self.hsv_frame)
+            mask = self.compute_mask(self.hsv_frame)
+            
+            # Reset ROI search counter after full search
+            self.frames_since_full_search = 0
+            self.roi_enabled = False
         
         # Step 4: Find best candidate
         candidate = self.find_candidate(mask)
@@ -721,13 +812,13 @@ class TargetTracker:
                 self.lock_duration, self.current_fps
             )
         
-        # Step 8: Annotate frame for visualization
-        vis_frame = self.annotate(frame_proc)
+        # Step 8: Annotate frame for visualization (in-place)
+        frame_for_display = self.annotate(frame_proc)
         
         # Store mask for debug visualization
         self._last_mask = mask
         
-        return vis_frame
+        return frame_for_display
     
     def get_debug_mask(self) -> Optional[np.ndarray]:
         """Get the last computed mask for debug visualization"""
@@ -746,6 +837,7 @@ def main():
     parser.add_argument('--csv', action='store_true', help='Output CSV tracking data')
     parser.add_argument('--no-display', action='store_true', help='Run without display (headless)')
     parser.add_argument('--no-logging', action='store_true', help='Disable result logging')
+    parser.add_argument('--threaded', action='store_true', help='Use threaded frame capture for better performance')
     
     args = parser.parse_args()
     
@@ -818,24 +910,55 @@ def main():
     print(f"Frame size: {Config.FRAME_WIDTH}x{Config.FRAME_HEIGHT}")
     print(f"Bounding box display: {'ON' if Config.SHOW_BOUNDING_BOX else 'OFF'}")
     print(f"Result logging: {'ON' if Config.ENABLE_RESULT_LOGGING else 'OFF'}")
+    print(f"Threaded capture: {'ON' if args.threaded else 'OFF'}")
     if not args.no_display:
         print("Look for window: 'Target Tracker - Main View' (this shows the red object with green bounding box)")
     
-    # Step 5: Main processing loop
+    # Step 5: Setup frame capture (threaded or direct)
+    frame_queue = None
+    capture_thread = None
+    
+    if args.threaded:
+        # Setup threaded frame capture
+        frame_queue = Queue(maxsize=2)
+        
+        def capture_frames():
+            """Thread function for frame capture"""
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                # Skip frame if queue is full (drop frames to maintain real-time)
+                if not frame_queue.full():
+                    frame_queue.put(frame)
+        
+        capture_thread = Thread(target=capture_frames, daemon=True)
+        capture_thread.start()
+        print("Threaded frame capture started")
+    
+    # Step 6: Main processing loop
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print(f"End of video or failed to read frame (frame {detector.frame_count})")
-                break
+            if args.threaded:
+                # Threaded frame capture
+                if frame_queue.empty():
+                    time.sleep(0.001)  # Small delay to prevent busy waiting
+                    continue
+                frame = frame_queue.get()
+            else:
+                # Direct frame capture
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"End of video or failed to read frame (frame {detector.frame_count})")
+                    break
             
             # Process frame through the complete pipeline
-            vis_frame = detector.process_frame(frame)
+            frame_for_display = detector.process_frame(frame)
             
             # Display results (if not headless)
             if not args.no_display:
                 # Always show main tracking view
-                cv2.imshow('Target Tracker - Main View', vis_frame)
+                cv2.imshow('Target Tracker - Main View', frame_for_display)
                 
                 # Show mask in debug mode if enabled
                 if Config.DEBUG and Config.SHOW_MASK:
@@ -848,9 +971,10 @@ def main():
                 if key == ord('q'):
                     break
                 elif key == ord('s'):
-                    # Save current frame
+                    # Save current frame (copy only when saving)
                     filename = f"frame_{detector.frame_count:06d}.jpg"
-                    cv2.imwrite(filename, vis_frame)
+                    to_save = frame_for_display.copy()
+                    cv2.imwrite(filename, to_save)
                     print(f"Saved frame: {filename}")
                 elif key == ord('m'):
                     # Toggle mask view
@@ -872,12 +996,15 @@ def main():
         print("\nInterrupted by user")
     
     finally:
-        # Step 6: Finalize result logging
+        # Step 7: Finalize result logging
         if result_logger:
             result_logger.finalize_session(detector.current_fps)
         
-        # Step 7: Cleanup
+        # Step 8: Cleanup
         cap.release()
+        if capture_thread and capture_thread.is_alive():
+            print("Stopping capture thread...")
+            # Thread will stop when cap.read() fails after cap.release()
         if not args.no_display:
             cv2.destroyAllWindows()
         print("Target Tracker stopped")
