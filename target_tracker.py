@@ -35,9 +35,9 @@ class Config:
     
     # HSV color thresholds for red target detection
     # Red color wraps around in HSV, so we need two ranges
-    HSV_LOWER1 = (0, 100, 100)    # Lower red range
+    HSV_LOWER1 = (0, 70, 70)      # Lower red range (more conservative)
     HSV_UPPER1 = (10, 255, 255)
-    HSV_LOWER2 = (160, 100, 100)  # Upper red range  
+    HSV_LOWER2 = (165, 70, 70)    # Upper red range (FIXED: 165 instead of 160 for extra safety)  
     HSV_UPPER2 = (180, 255, 255)
     
     # Detection filtering parameters
