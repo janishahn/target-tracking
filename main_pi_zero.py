@@ -294,7 +294,7 @@ def main():
     
     # Configuration for headless operation
     output_dir = "pi_zero_output"
-    snapshot_interval = 30  # Save snapshot every N frames
+    snapshot_interval = 10  # Save snapshot every N frames
     status_interval = 150   # Print status every N frames
     
     # Enable diagnostic mode for detection debugging
