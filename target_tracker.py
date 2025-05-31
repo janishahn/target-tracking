@@ -849,7 +849,6 @@ def main():
     
     if args.debug:
         Config.DEBUG = True
-        # Don't automatically show mask in debug mode - let user toggle with 'm' key
     
     if args.csv:
         Config.OUTPUT_CSV = True
