@@ -98,7 +98,6 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
     
     if not force_headless:
         try:
-            import os
             if os.environ.get('DISPLAY'):
                 # Try to create a test window to see if display works
                 test_img = np.zeros((100, 100, 3), dtype=np.uint8)
