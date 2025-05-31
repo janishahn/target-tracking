@@ -313,11 +313,15 @@ def main():
     Config.HSV_LOWER2 = (40, 50, 50)    # Extended green range
     Config.HSV_UPPER2 = (80, 255, 255)
     
+    # Allow larger green blobs (increase max detection radius for close objects)
+    Config.MAX_DETECTION_RADIUS = 200  # Increased from 100 to 200 pixels
+    
     # Diagnostic: Relax detection parameters for better detection
     if diagnostic_mode:
         print("DIAGNOSTIC MODE ENABLED - Relaxing detection parameters for GREEN objects")
         Config.MIN_AREA = 50  # Reduce from 200 to 50
         Config.MIN_CIRCULARITY = 0.3  # Reduce from 0.6 to 0.3
+        Config.MAX_DETECTION_RADIUS = 250  # Allow very large green blobs when close to camera
         # Green HSV ranges - green doesn't wrap around like red, so we use one main range
         Config.HSV_LOWER1 = (40, 50, 50)    # Green range (hue 40-80)
         Config.HSV_UPPER1 = (80, 255, 255)

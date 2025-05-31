@@ -2,6 +2,7 @@
 """
 macOS Webcam Integration for Target Tracking
 Optimized for macOS development using built-in webcam with the existing TargetTracker pipeline
+Configured to track GREEN objects instead of red
 """
 
 import time
@@ -79,7 +80,7 @@ def main():
     print("=" * 60)
     print("MACOS WEBCAM TARGET TRACKER")
     print("=" * 60)
-    print("Initializing built-in webcam for red blob tracking...")
+    print("Initializing built-in webcam for green blob tracking...")
     
     # Step 1: Initialize webcam
     try:
@@ -101,7 +102,15 @@ def main():
     )
     capture_thread.start()
     
-    # Step 3: Initialize tracking components
+    # Step 3: Configure for GREEN object tracking and initialize components
+    # Configure for GREEN object tracking with larger blob support
+    Config.HSV_LOWER1 = (45, 60, 60)    # Green range (conservative)
+    Config.HSV_UPPER1 = (75, 255, 255)
+    Config.HSV_LOWER2 = (40, 50, 50)    # Extended green range
+    Config.HSV_UPPER2 = (80, 255, 255)
+    Config.MAX_DETECTION_RADIUS = 200   # Allow larger green blobs for close objects
+    Config.MIN_AREA = 100               # Slightly larger minimum area for better detection
+    
     result_logger = ResultLogger("macOS_Webcam") if Config.ENABLE_RESULT_LOGGING else None
     tracker = TargetTracker(result_logger, 0)  # 0 indicates camera source
     
@@ -111,7 +120,7 @@ def main():
     
     # Step 5: Print status and controls
     print("\nWebcam feed started successfully!")
-    print(f"Target: Red objects (HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1}, {Config.HSV_LOWER2}-{Config.HSV_UPPER2})")
+    print(f"Target: Green objects (HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1}, {Config.HSV_LOWER2}-{Config.HSV_UPPER2})")
     print(f"Min area: {Config.MIN_AREA} pixels")
     print(f"Processing resolution: {Config.FRAME_WIDTH}x{Config.FRAME_HEIGHT}")
     print(f"Result logging: {'ON' if Config.ENABLE_RESULT_LOGGING else 'OFF'}")
@@ -194,7 +203,7 @@ def main():
                 tracker.needs_rgb_to_bgr_conversion = not tracker.needs_rgb_to_bgr_conversion
                 tracker.color_format_detected = True  # Mark as manually set
                 format_str = "RGB->BGR" if tracker.needs_rgb_to_bgr_conversion else "BGR (no conversion)"
-                print(f"🔴 Color format manually set to: {format_str}")
+                print(f"🟢 Color format manually set to: {format_str}")
                 print(f"💡 If this fixes the issue, you can set Config.FORCE_COLOR_FORMAT = {tracker.needs_rgb_to_bgr_conversion} to make it permanent")
             elif key == ord('d'):
                 # Toggle debug mode
@@ -210,9 +219,9 @@ def main():
             elif key == ord('r'):
                 # Reset tracking
                 print("Resetting tracker state...")
-                # Re-initialize tracker to reset state
+                # Re-initialize tracker to reset state (maintain green configuration)
                 tracker = TargetTracker(result_logger, 0)  # 0 indicates camera source
-                print("Tracker reset complete")
+                print("Tracker reset complete (green object tracking maintained)")
     
     except KeyboardInterrupt:
         print("\nInterrupted by user (Ctrl+C)")
