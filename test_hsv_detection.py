@@ -123,7 +123,7 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
         from picamera2 import Picamera2
         picam2 = Picamera2()
         camera_config = picam2.create_video_configuration(
-            main={"size": (320, 240), "format": "RGB888"},
+            main={"size": (640, 480), "format": "RGB888"},
             buffer_count=2
         )
         picam2.configure(camera_config)
@@ -133,7 +133,9 @@ def test_with_camera(force_headless=False, output_dir="hsv_camera_test"):
         max_frames = 50 if headless_mode else 1000
         
         while frame_count < max_frames:
-            frame_rgb = picam2.capture_array("main")
+            # Capture at full resolution (640x480) then downsample to 320x240
+            frame_rgb_full = picam2.capture_array("main")
+            frame_rgb = cv2.resize(frame_rgb_full, (320, 240), interpolation=cv2.INTER_AREA)
             
             # Convert RGB directly to HSV for correct color detection
             hsv = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2HSV)
