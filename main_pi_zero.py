@@ -220,7 +220,7 @@ def video_file_thread(video_path: str, frame_queue: Queue):
     cap.release()
     print("Video file processing completed")
 
-def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple) -> str:
+def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state: tuple, is_camera_feed: bool = False) -> str:
     """
     Save annotated frame snapshot with tracking information
     
@@ -229,6 +229,7 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
         output_dir: Directory to save snapshots
         frame_number: Current frame number
         tracker_state: (cx, cy, radius, locked, bbox) from tracker
+        is_camera_feed: True if frame came from live camera (needs BGR->RGB conversion)
         
     Returns:
         Filename of saved snapshot
@@ -240,7 +241,15 @@ def save_snapshot(frame: any, output_dir: str, frame_number: int, tracker_state:
     filename = f"snapshot_f{frame_number:06d}_{timestamp}_{status}.jpg"
     filepath = os.path.join(output_dir, filename)
     
-    cv2.imwrite(filepath, frame)
+    # Fix color channel inversion for camera feed
+    if is_camera_feed:
+        # Convert BGR back to RGB for correct color saving
+        frame_to_save = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    else:
+        # Video file frames are already in correct format
+        frame_to_save = frame
+    
+    cv2.imwrite(filepath, frame_to_save)
     return filename
 
 def parse_arguments():
@@ -365,7 +374,7 @@ def main():
             if tracker.frame_count % snapshot_interval == 0:
                 filename = save_snapshot(
                     annotated_frame, output_dir, tracker.frame_count, 
-                    (cx, cy, radius, locked, bbox)
+                    (cx, cy, radius, locked, bbox), is_camera_feed=not args.source
                 )
                 print(f"Snapshot saved: {filename}")
             
