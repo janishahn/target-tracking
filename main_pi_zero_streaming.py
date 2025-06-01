@@ -123,7 +123,11 @@ class ServoController:
             return
         
         for i, pwm in enumerate(self.pwm_objects):
-            duty_cycle = self.angle_to_duty_cycle(angle)
+            # Invert top_right servo (pin 19, index 1) to match top_left direction
+            servo_angle = angle
+            if i == 1:  # top_right servo (pin 19)
+                servo_angle = 180.0 - angle  # Invert the angle
+            duty_cycle = self.angle_to_duty_cycle(servo_angle)
             # Send position command
             pwm.ChangeDutyCycle(duty_cycle)
         
@@ -267,7 +271,11 @@ class ServoController:
                 if max_angle_change >= 2.0:  # Minimum 2° change to actuate
                     # Set servos to new positions
                     for i, pwm in enumerate(self.pwm_objects):
-                        duty_cycle = self.angle_to_duty_cycle(smoothed_angles[i])
+                        # Invert top_right servo (pin 19, index 1) to match top_left direction
+                        angle = smoothed_angles[i]
+                        if i == 1:  # top_right servo (pin 19)
+                            angle = 180.0 - angle  # Invert the angle
+                        duty_cycle = self.angle_to_duty_cycle(angle)
                         pwm.ChangeDutyCycle(duty_cycle)
                     
                     # Wait for servos to reach position
