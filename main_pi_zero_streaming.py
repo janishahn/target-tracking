@@ -32,7 +32,7 @@ class ServoController:
     No tracking-based actuation - just initial positioning.
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=2):
+    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50):
         """
         Initialize servo controller for welcome adjustment only.
         
@@ -106,7 +106,12 @@ class ServoController:
         
         for i, pwm in enumerate(self.pwm_objects):
             duty_cycle = self.angle_to_duty_cycle(angle)
+            GPIO.output(self.pins[i], True)
             pwm.ChangeDutyCycle(duty_cycle)
+            time.sleep(0.2)
+            GPIO.output(self.pins[i], False)
+            time.sleep(0.2)
+            pwm.ChangeDutyCycle(0)
         
         print(f"All servos set to {angle}°")
     
