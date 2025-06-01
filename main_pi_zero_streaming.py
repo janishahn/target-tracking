@@ -96,6 +96,7 @@ class ServoController:
     def set_all_servos(self, angle):
         """
         Set all servos to the specified angle.
+        For servos that don't need continuous PWM signal.
         
         Args:
             angle: Target angle in degrees
@@ -106,14 +107,17 @@ class ServoController:
         
         for i, pwm in enumerate(self.pwm_objects):
             duty_cycle = self.angle_to_duty_cycle(angle)
-            GPIO.output(self.pins[i], True)
+            # Send position command
             pwm.ChangeDutyCycle(duty_cycle)
-            time.sleep(0.2)
-            GPIO.output(self.pins[i], False)
-            time.sleep(0.2)
+        
+        # Wait for servos to reach position
+        time.sleep(0.5)  # Adjust timing based on your servo speed
+        
+        # Stop PWM signal after servos reach position
+        for pwm in self.pwm_objects:
             pwm.ChangeDutyCycle(0)
         
-        print(f"All servos set to {angle}°")
+        print(f"All servos set to {angle}° and PWM stopped")
     
     def welcome_adjustment(self):
         """
