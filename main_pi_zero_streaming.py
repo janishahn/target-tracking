@@ -32,7 +32,7 @@ class ServoController:
     No tracking-based actuation - just initial positioning.
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50):
+    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=2):
         """
         Initialize servo controller for welcome adjustment only.
         
