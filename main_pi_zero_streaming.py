@@ -28,26 +28,43 @@ except ImportError:
 
 class ServoController:
     """
-    Simple servo controller that performs a welcome adjustment sequence only.
-    No tracking-based actuation - just initial positioning.
+    Servo controller that performs welcome adjustment and target tracking.
+    Actuates servos only when target is detected with proper smoothing.
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50):
+    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50, smoothing_factor=0.3):
         """
-        Initialize servo controller for welcome adjustment only.
+        Initialize servo controller for welcome adjustment and target tracking.
         
         Args:
             pins: GPIO pins for servos [top_left, top_right, bottom_left, bottom_right]
             pwm_frequency: PWM frequency in Hz (typically 50Hz for servos)
+            smoothing_factor: Smoothing factor for servo movements (0-1, lower = smoother)
         """
         self.pins = pins
         self.pwm_frequency = pwm_frequency
+        self.smoothing_factor = smoothing_factor
         self.pwm_objects = []
         
         # Servo angle limits
         self.min_angle = 45.0
         self.max_angle = 135.0
         self.center_angle = 90.0
+        
+        # Frame dimensions for offset calculations
+        self.frame_width = Config.FRAME_WIDTH
+        self.frame_height = Config.FRAME_HEIGHT
+        self.frame_center_x = self.frame_width // 2
+        self.frame_center_y = self.frame_height // 2
+        
+        # Smoothing and timing
+        self.last_angles = [self.center_angle] * 4  # Track last servo positions
+        self.last_actuation_time = 0
+        self.min_actuation_interval = 0.2  # Minimum time between servo movements (200ms)
+        
+        # Target tracking state
+        self.target_history = []
+        self.max_history_length = 5  # Smooth over 5 frames
         
         self.initialized = False
         self.initialize_servos()
@@ -111,7 +128,7 @@ class ServoController:
             pwm.ChangeDutyCycle(duty_cycle)
         
         # Wait for servos to reach position
-        time.sleep(0.5)  # Adjust timing based on your servo speed
+        time.sleep(0.1)  # Adjust timing based on your servo speed
         
         # Stop PWM signal after servos reach position
         for pwm in self.pwm_objects:
@@ -141,6 +158,135 @@ class ServoController:
         
         print("Welcome adjustment sequence completed - servos at center position")
     
+    def calculate_servo_angles(self, x_offset, y_offset):
+        """
+        Calculate servo angles based on target offset from frame center.
+        
+        Args:
+            x_offset: Horizontal offset from center (positive = right)
+            y_offset: Vertical offset from center (positive = down)
+            
+        Returns:
+            List of servo angles [top_left, top_right, bottom_left, bottom_right]
+        """
+        # Normalize offsets to [-1, 1] range
+        max_x_offset = self.frame_center_x
+        max_y_offset = self.frame_center_y
+        
+        norm_x = max(-1.0, min(1.0, x_offset / max_x_offset))
+        norm_y = max(-1.0, min(1.0, y_offset / max_y_offset))
+        
+        # Calculate angle range (45° range around center)
+        angle_range = (self.max_angle - self.min_angle) / 2.0  # 45°
+        
+        # Calculate individual servo angles based on quadrant influence
+        # Top-left servo: influenced by negative x and negative y
+        top_left = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
+        
+        # Top-right servo: influenced by positive x and negative y  
+        top_right = self.center_angle + angle_range * (norm_x - norm_y) / 2.0
+        
+        # Bottom-left servo: influenced by negative x and positive y
+        bottom_left = self.center_angle + angle_range * (-norm_x + norm_y) / 2.0
+        
+        # Bottom-right servo: influenced by positive x and positive y
+        bottom_right = self.center_angle + angle_range * (norm_x + norm_y) / 2.0
+        
+        # Clamp angles to valid range
+        angles = [
+            max(self.min_angle, min(self.max_angle, top_left)),
+            max(self.min_angle, min(self.max_angle, top_right)),
+            max(self.min_angle, min(self.max_angle, bottom_left)),
+            max(self.min_angle, min(self.max_angle, bottom_right))
+        ]
+        
+        return angles
+    
+    def smooth_target_position(self, x_offset, y_offset):
+        """
+        Apply smoothing to target position using moving average.
+        
+        Args:
+            x_offset: Horizontal offset from center
+            y_offset: Vertical offset from center
+            
+        Returns:
+            Smoothed (x_offset, y_offset) tuple
+        """
+        # Add current position to history
+        self.target_history.append((x_offset, y_offset))
+        
+        # Limit history length
+        if len(self.target_history) > self.max_history_length:
+            self.target_history.pop(0)
+        
+        # Calculate moving average
+        if len(self.target_history) > 1:
+            avg_x = sum(pos[0] for pos in self.target_history) / len(self.target_history)
+            avg_y = sum(pos[1] for pos in self.target_history) / len(self.target_history)
+            return int(avg_x), int(avg_y)
+        else:
+            return x_offset, y_offset
+    
+    def update_servos_for_target(self, x_offset, y_offset, has_target=True):
+        """
+        Update servo positions based on target offset with smoothing and timing control.
+        Only actuates servos when target is detected.
+        
+        Args:
+            x_offset: Horizontal offset from center
+            y_offset: Vertical offset from center  
+            has_target: Whether a target is currently detected
+        """
+        if not self.initialized:
+            return
+        
+        current_time = time.time()
+        
+        if has_target:
+            # Apply position smoothing
+            smooth_x, smooth_y = self.smooth_target_position(x_offset, y_offset)
+            
+            # Calculate target angles
+            target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
+            
+            # Apply servo-level smoothing
+            smoothed_angles = []
+            for i, target_angle in enumerate(target_angles):
+                # Exponential smoothing with last known position
+                smoothed_angle = (self.last_angles[i] * (1 - self.smoothing_factor) + 
+                                target_angle * self.smoothing_factor)
+                smoothed_angles.append(smoothed_angle)
+            
+            # Check if enough time has passed since last actuation
+            if current_time - self.last_actuation_time >= self.min_actuation_interval:
+                # Check if movement is significant enough (avoid micro-movements)
+                max_angle_change = max(abs(smoothed_angles[i] - self.last_angles[i]) 
+                                     for i in range(4))
+                
+                if max_angle_change >= 2.0:  # Minimum 2° change to actuate
+                    # Set servos to new positions
+                    for i, pwm in enumerate(self.pwm_objects):
+                        duty_cycle = self.angle_to_duty_cycle(smoothed_angles[i])
+                        pwm.ChangeDutyCycle(duty_cycle)
+                    
+                    # Wait for servos to reach position
+                    time.sleep(0.1)
+                    
+                    # Stop PWM signal
+                    for pwm in self.pwm_objects:
+                        pwm.ChangeDutyCycle(0)
+                    
+                    # Update tracking variables
+                    self.last_angles = smoothed_angles.copy()
+                    self.last_actuation_time = current_time
+                    
+                    print(f"Servos updated: TL={smoothed_angles[0]:.1f}° TR={smoothed_angles[1]:.1f}° "
+                          f"BL={smoothed_angles[2]:.1f}° BR={smoothed_angles[3]:.1f}°")
+        else:
+            # No target - clear smoothing history but don't move servos
+            self.target_history.clear()
+    
     def get_servo_status(self):
         """
         Get current servo status for debugging.
@@ -150,6 +296,7 @@ class ServoController:
         """
         return {
             'pins': self.pins,
+            'angles': self.last_angles.copy(),
             'initialized': self.initialized,
             'gpio_available': GPIO_AVAILABLE
         }
@@ -376,7 +523,7 @@ def video_file_thread(video_path: str, frame_queue: Queue):
 
 def parse_arguments():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Target Tracker with Live Streaming and Servo Welcome Adjustment')
+    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Target Tracker with Live Streaming and Servo Control')
     parser.add_argument('--source', type=str, help='MP4 video file to process instead of live camera')
     parser.add_argument('--port', type=int, default=8080, help='HTTP streaming port (default: 8080)')
     parser.add_argument('--no-stream', action='store_true', help='Disable streaming (headless only)')
@@ -393,7 +540,7 @@ def main():
     args = parse_arguments()
     
     print("=" * 60)
-    print("RASPBERRY PI ZERO 2W TARGET TRACKER WITH LIVE STREAMING AND SERVO WELCOME ADJUSTMENT")
+    print("RASPBERRY PI ZERO 2W TARGET TRACKER WITH LIVE STREAMING AND SERVO CONTROL")
     print("=" * 60)
     
     if args.source:
@@ -410,7 +557,7 @@ def main():
         print("Streaming disabled - headless mode only")
     
     if not args.no_servos:
-        print(f"Servo welcome adjustment enabled on pins {args.servo_pins}")
+        print(f"Servo control enabled on pins {args.servo_pins}")
     else:
         print("Servo control disabled")
     
@@ -512,14 +659,15 @@ def main():
     video_source = args.source if args.source else 0  # 0 for camera, file path for video
     tracker = TargetTracker(result_logger=None, video_source=video_source)  # No result logger
     
-    print("\nTarget tracking with live streaming and servo welcome adjustment started!")
+    print("\nTarget tracking with live streaming and servo control started!")
     print(f"Camera FOV: 1280x960 (double resolution for larger field of view)")
     print(f"Processing resolution: 640x480 (maintains Pi Zero workload)")
     print(f"Target: Green objects, min area: {Config.MIN_AREA} pixels")
     if servo_controller:
         servo_status = servo_controller.get_servo_status()
-        print(f"Servo welcome adjustment: 4 servos on pins {servo_status['pins']}")
-        print(f"Servo range: 45-135°, center: 90° (welcome sequence completed)")
+        print(f"Servo control: 4 servos on pins {servo_status['pins']}")
+        print(f"Servo range: 45-135°, center: 90°, smoothing: {servo_controller.smoothing_factor}")
+        print(f"Servo timing: {servo_controller.min_actuation_interval}s interval, 0.1s move time")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
         print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
@@ -567,6 +715,10 @@ def main():
             abs_distance, x_offset, y_offset, frame_center_x, frame_center_y = distance_info
             has_detection = (cx != -1 and cy != -1)
             
+            # Update servo positions based on target tracking
+            if servo_controller:
+                servo_controller.update_servos_for_target(x_offset, y_offset, has_detection and locked)
+            
             # Print status periodically
             if tracker.frame_count % status_interval == 0:
                 print(f"\n--- Frame {tracker.frame_count} Status ---")
@@ -581,7 +733,8 @@ def main():
                 # Show servo status
                 if servo_controller:
                     servo_status = servo_controller.get_servo_status()
-                    print(f"Servos: Pins {servo_status['pins']} (welcome adjustment completed)")
+                    angles = servo_status['angles']
+                    print(f"Servos: TL={angles[0]:.1f}° TR={angles[1]:.1f}° BL={angles[2]:.1f}° BR={angles[3]:.1f}°")
                 
                 if streaming_server:
                     pi_ip = get_pi_ip_address()
@@ -611,7 +764,7 @@ def main():
         if servo_controller:
             servo_controller.cleanup()
         
-        print("Target tracker with streaming and servo welcome adjustment stopped successfully!")
+        print("Target tracker with streaming and servo control stopped successfully!")
 
 if __name__ == "__main__":
     main() 
