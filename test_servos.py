@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Simple servo test script for the Pi Zero target tracking system.
 Tests servo movement and positioning to verify hardware setup.
@@ -147,8 +146,17 @@ class ServoTester:
     def cleanup(self):
         """Clean up GPIO resources."""
         if GPIO_AVAILABLE and self.initialized:
+            # Stop PWM objects first
             for pwm in self.pwm_objects:
-                pwm.stop()
+                try:
+                    pwm.stop()
+                except:
+                    pass  # Ignore errors if already stopped
+            
+            # Clear the PWM objects list to prevent destructor issues
+            self.pwm_objects.clear()
+            
+            # Clean up GPIO
             GPIO.cleanup()
             print("GPIO cleanup completed")
 
