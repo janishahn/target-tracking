@@ -998,7 +998,7 @@ class TargetTracker:
         frame_for_display = self.annotate(frame_proc)
         
         # Store mask for debug visualization
-        self._last_mask = mask
+        self._last_mask = mask_to_use
         
         return frame_for_display
     
