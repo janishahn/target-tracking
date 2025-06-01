@@ -33,7 +33,7 @@ class ServoController:
     """
     
     def __init__(self, pins=[18, 19, 20, 21], min_deflection=3.0, pwm_frequency=50, 
-                 servo_smoothing=0.15, update_rate_limit=10, center_delay=5):
+                 servo_smoothing=0.15, center_delay=5):
         """
         Initialize servo controller.
         
@@ -42,17 +42,17 @@ class ServoController:
             min_deflection: Minimum angle change required to update servo (degrees)
             pwm_frequency: PWM frequency in Hz (typically 50Hz for servos)
             servo_smoothing: Smoothing factor for servo movements (0-1, lower = smoother)
-            update_rate_limit: Maximum servo updates per second
             center_delay: Frames to wait before returning to center when target is lost
         """
         self.pins = pins
-        self.min_deflection = min_deflection
+        self.min_deflection = max(min_deflection, 8.0)  # Enforce minimum 8° to reduce twitching
         self.pwm_frequency = pwm_frequency
         self.servo_smoothing = servo_smoothing
-        self.update_rate_limit = update_rate_limit
+        self.update_rate_limit = 1  # Fixed at 1 Hz (once per second)
         
         self.current_angles = [90.0, 90.0, 90.0, 90.0]  # Start at center position
         self.target_angles = [90.0, 90.0, 90.0, 90.0]   # Target angles for smoothing
+        self.stable_angles = [90.0, 90.0, 90.0, 90.0]   # Last stable servo positions
         self.pwm_objects = []
         
         # Frame dimensions for offset calculations
@@ -68,11 +68,15 @@ class ServoController:
         
         # Rate limiting
         self.last_update_time = 0
-        self.min_update_interval = 1.0 / update_rate_limit
+        self.min_update_interval = 1.0 / self.update_rate_limit
         
-        # Enhanced tracking smoothing
+        # Enhanced tracking smoothing with longer history
         self.position_history = []
-        self.max_history_length = 5
+        self.max_history_length = 15  # Increased for better smoothing
+        
+        # Dead zone for micro-movements (pixels)
+        self.position_dead_zone = 30  # Ignore movements smaller than 30 pixels
+        self.last_significant_position = (0, 0)  # Track last position outside dead zone
         
         # Target state tracking
         self.last_target_state = False  # Track previous target state
@@ -101,9 +105,11 @@ class ServoController:
             
             print(f"Servos initialized on pins {self.pins}")
             print(f"Servo range: {self.min_angle}° - {self.max_angle}°")
-            print(f"Minimum deflection threshold: {self.min_deflection}°")
+            print(f"Minimum deflection threshold: {self.min_deflection}° (enforced minimum: 8°)")
             print(f"Servo smoothing factor: {self.servo_smoothing}")
-            print(f"Update rate limit: {self.update_rate_limit} Hz")
+            print(f"Update rate limit: 1 Hz (fixed, once per second)")
+            print(f"Position dead zone: {self.position_dead_zone} pixels")
+            print(f"Position smoothing history: {self.max_history_length} frames")
             print(f"Center return delay: {self.center_return_threshold} frames")
             self.initialized = True
             
@@ -174,7 +180,7 @@ class ServoController:
     
     def smooth_position(self, x_offset, y_offset):
         """
-        Apply additional smoothing to position data using moving average.
+        Apply additional smoothing to position data using moving average with dead zone filtering.
         
         Args:
             x_offset: Horizontal offset from center
@@ -183,17 +189,35 @@ class ServoController:
         Returns:
             Smoothed (x_offset, y_offset) tuple
         """
-        # Add current position to history
-        self.position_history.append((x_offset, y_offset))
+        # Calculate distance from last significant position
+        distance = ((x_offset - self.last_significant_position[0])**2 + 
+                   (y_offset - self.last_significant_position[1])**2)**0.5
+        
+        # Only update if movement is significant (outside dead zone)
+        if distance >= self.position_dead_zone:
+            self.last_significant_position = (x_offset, y_offset)
+            # Add current position to history
+            self.position_history.append((x_offset, y_offset))
+        else:
+            # Use last significant position to reduce jitter
+            if self.last_significant_position != (0, 0):
+                self.position_history.append(self.last_significant_position)
+            else:
+                self.position_history.append((x_offset, y_offset))
         
         # Limit history length
         if len(self.position_history) > self.max_history_length:
             self.position_history.pop(0)
         
-        # Calculate moving average
+        # Calculate moving average with stronger smoothing
         if len(self.position_history) > 1:
-            avg_x = sum(pos[0] for pos in self.position_history) / len(self.position_history)
-            avg_y = sum(pos[1] for pos in self.position_history) / len(self.position_history)
+            # Use weighted average favoring recent positions
+            weights = [i + 1 for i in range(len(self.position_history))]
+            total_weight = sum(weights)
+            
+            avg_x = sum(pos[0] * weight for pos, weight in zip(self.position_history, weights)) / total_weight
+            avg_y = sum(pos[1] * weight for pos, weight in zip(self.position_history, weights)) / total_weight
+            
             return int(avg_x), int(avg_y)
         else:
             return x_offset, y_offset
@@ -228,26 +252,45 @@ class ServoController:
             smooth_x, smooth_y = self.smooth_position(x_offset, y_offset)
             
             # Calculate target angles based on smoothed offset
-            self.target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
+            new_target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
             
-            # Apply servo-level smoothing and minimum deflection filtering
-            for i, target_angle in enumerate(self.target_angles):
-                # Smooth transition to target angle
-                angle_diff = target_angle - self.current_angles[i]
+            # Additional stability check: only update if target angles changed significantly
+            total_angle_change = sum(abs(new_target_angles[i] - self.target_angles[i]) for i in range(4))
+            
+            if total_angle_change >= self.min_deflection:  # Only update if combined change is significant
+                self.target_angles = new_target_angles
                 
-                # Only update if change is significant enough
-                if abs(angle_diff) >= self.min_deflection:
-                    # Apply exponential smoothing for gradual movement
-                    smoothed_angle = self.current_angles[i] + (angle_diff * self.servo_smoothing)
+                # Track if any servo actually moved
+                any_servo_moved = False
+                
+                # Apply servo-level smoothing and minimum deflection filtering
+                for i, target_angle in enumerate(self.target_angles):
+                    # Calculate difference from current stable position (not smoothed position)
+                    angle_diff = target_angle - self.stable_angles[i]
                     
-                    # Clamp to valid range
-                    smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
-                    
-                    self.current_angles[i] = smoothed_angle
-                    
-                    if GPIO_AVAILABLE and i < len(self.pwm_objects):
-                        duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
-                        self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
+                    # Only update if change is significant enough from stable position
+                    if abs(angle_diff) >= self.min_deflection:
+                        # Apply exponential smoothing for gradual movement
+                        smoothed_angle = self.current_angles[i] + (angle_diff * self.servo_smoothing)
+                        
+                        # Clamp to valid range
+                        smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
+                        
+                        self.current_angles[i] = smoothed_angle
+                        
+                        # Update stable position to new target
+                        self.stable_angles[i] = target_angle
+                        any_servo_moved = True
+                        
+                        if GPIO_AVAILABLE and i < len(self.pwm_objects):
+                            duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
+                            self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
+                
+                if any_servo_moved:
+                    print(f"Servo update: {[f'{angle:.1f}°' for angle in self.current_angles]}")
+            else:
+                # Target angles haven't changed enough - skip update
+                return
                 
         else:
             # No target - handle transition to center
@@ -255,6 +298,9 @@ class ServoController:
             
             # Clear position history when target is lost
             self.position_history.clear()
+            
+            # Reset dead zone tracking
+            self.last_significant_position = (0, 0)
             
             # Only return to center after a delay and if we previously had a target
             if (self.last_target_state and 
@@ -304,6 +350,7 @@ class ServoController:
                 smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
                 
                 self.current_angles[i] = smoothed_angle
+                self.stable_angles[i] = smoothed_angle  # Update stable position for center
                 servo_updated = True
                 
                 if GPIO_AVAILABLE and i < len(self.pwm_objects):
@@ -562,8 +609,7 @@ def parse_arguments():
                         help='Minimum servo angle change to prevent twitching (default: 3.0 degrees)')
     parser.add_argument('--servo-smoothing', type=float, default=0.15, 
                         help='Servo smoothing factor (0-1, lower = smoother, default: 0.15)')
-    parser.add_argument('--servo-rate', type=int, default=10, 
-                        help='Maximum servo updates per second (default: 10 Hz)')
+
     parser.add_argument('--center-delay', type=int, default=5, 
                         help='Frames to wait before returning to center when target is lost (default: 5)')
     return parser.parse_args()
@@ -596,7 +642,7 @@ def main():
         print(f"Servo control enabled on pins {args.servo_pins}")
         print(f"Minimum deflection threshold: {args.min_deflection}°")
         print(f"Servo smoothing factor: {args.servo_smoothing}")
-        print(f"Servo update rate: {args.servo_rate} Hz")
+        print(f"Servo update rate: 1 Hz (fixed, once per second)")
     else:
         print("Servo control disabled")
     
@@ -687,7 +733,6 @@ def main():
                 pins=args.servo_pins,
                 min_deflection=args.min_deflection,
                 servo_smoothing=args.servo_smoothing,
-                update_rate_limit=args.servo_rate,
                 center_delay=args.center_delay
             )
             print("Servo controller initialized successfully")
@@ -707,7 +752,7 @@ def main():
         servo_status = servo_controller.get_servo_status()
         print(f"Servo control: 4 servos on pins {servo_status['pins']}")
         print(f"Servo range: 45-135°, center: 90°, min deflection: {args.min_deflection}°")
-        print(f"Servo smoothing: {args.servo_smoothing}, update rate: {args.servo_rate} Hz")
+        print(f"Servo smoothing: {args.servo_smoothing}, update rate: 1 Hz (fixed)")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
         print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
