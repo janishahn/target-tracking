@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Raspberry Pi Zero 2W Target Tracking with Live HTTP MJPEG Streaming
+Raspberry Pi Zero 2W Target Tracking with Live HTTP MJPEG Streaming and Servo Control
 Streams annotated video feed to network while maintaining headless operation
+Controls 4 servos based on target position relative to frame center
 Access stream at: http://PI_IP_ADDRESS:8080/stream
 """
 
 import time
 import threading
 import argparse
+import os
 from queue import Queue
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -16,6 +18,187 @@ from socketserver import ThreadingMixIn
 import cv2
 from picamera2 import Picamera2
 from target_tracker import TargetTracker, Config
+
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    print("Warning: RPi.GPIO not available. Servo control will be simulated.")
+    GPIO_AVAILABLE = False
+
+class ServoController:
+    """
+    Controls 4 servos based on target position with robust actuation and minimum deflection thresholds.
+    Servo layout: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+    """
+    
+    def __init__(self, pins=[18, 19, 20, 21], min_deflection=2.0, pwm_frequency=50):
+        """
+        Initialize servo controller.
+        
+        Args:
+            pins: GPIO pins for servos [top_left, top_right, bottom_left, bottom_right]
+            min_deflection: Minimum angle change required to update servo (degrees)
+            pwm_frequency: PWM frequency in Hz (typically 50Hz for servos)
+        """
+        self.pins = pins
+        self.min_deflection = min_deflection
+        self.pwm_frequency = pwm_frequency
+        self.current_angles = [90.0, 90.0, 90.0, 90.0]  # Start at center position
+        self.pwm_objects = []
+        
+        # Frame dimensions for offset calculations
+        self.frame_width = Config.FRAME_WIDTH
+        self.frame_height = Config.FRAME_HEIGHT
+        self.frame_center_x = self.frame_width // 2
+        self.frame_center_y = self.frame_height // 2
+        
+        # Servo angle limits
+        self.min_angle = 45.0
+        self.max_angle = 135.0
+        self.center_angle = 90.0
+        
+        self.initialized = False
+        self.initialize_servos()
+    
+    def initialize_servos(self):
+        """Initialize GPIO and PWM for servo control."""
+        if not GPIO_AVAILABLE:
+            print("Servo control simulation mode (RPi.GPIO not available)")
+            self.initialized = True
+            return
+        
+        try:
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setwarnings(False)
+            
+            for pin in self.pins:
+                GPIO.setup(pin, GPIO.OUT)
+                pwm = GPIO.PWM(pin, self.pwm_frequency)
+                pwm.start(self.angle_to_duty_cycle(self.center_angle))
+                self.pwm_objects.append(pwm)
+            
+            print(f"Servos initialized on pins {self.pins}")
+            print(f"Servo range: {self.min_angle}° - {self.max_angle}°")
+            print(f"Minimum deflection threshold: {self.min_deflection}°")
+            self.initialized = True
+            
+        except Exception as e:
+            print(f"Failed to initialize servos: {e}")
+            self.initialized = False
+    
+    def angle_to_duty_cycle(self, angle):
+        """
+        Convert servo angle to PWM duty cycle.
+        
+        Args:
+            angle: Servo angle in degrees (0-180)
+            
+        Returns:
+            PWM duty cycle percentage (typically 2.5-12.5 for 0-180 degrees)
+        """
+        # Standard servo: 1ms pulse = 0°, 1.5ms pulse = 90°, 2ms pulse = 180°
+        # For 50Hz PWM: 1ms = 5% duty cycle, 1.5ms = 7.5%, 2ms = 10%
+        min_duty = 2.5  # 0.5ms pulse width
+        max_duty = 12.5  # 2.5ms pulse width
+        duty_cycle = min_duty + (angle / 180.0) * (max_duty - min_duty)
+        return duty_cycle
+    
+    def calculate_servo_angles(self, x_offset, y_offset):
+        """
+        Calculate servo angles based on target offset from frame center.
+        
+        Args:
+            x_offset: Horizontal offset from center (positive = right)
+            y_offset: Vertical offset from center (positive = down)
+            
+        Returns:
+            List of servo angles [top_left, top_right, bottom_left, bottom_right]
+        """
+        # Normalize offsets to [-1, 1] range
+        max_x_offset = self.frame_center_x
+        max_y_offset = self.frame_center_y
+        
+        norm_x = max(-1.0, min(1.0, x_offset / max_x_offset))
+        norm_y = max(-1.0, min(1.0, y_offset / max_y_offset))
+        
+        # Calculate angle range (45° range around center)
+        angle_range = (self.max_angle - self.min_angle) / 2.0  # 45°
+        
+        # Calculate individual servo angles based on quadrant influence
+        # Top-left servo: influenced by negative x and negative y
+        top_left = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
+        
+        # Top-right servo: influenced by positive x and negative y  
+        top_right = self.center_angle + angle_range * (norm_x - norm_y) / 2.0
+        
+        # Bottom-left servo: influenced by negative x and positive y
+        bottom_left = self.center_angle + angle_range * (-norm_x + norm_y) / 2.0
+        
+        # Bottom-right servo: influenced by positive x and positive y
+        bottom_right = self.center_angle + angle_range * (norm_x + norm_y) / 2.0
+        
+        # Clamp angles to valid range
+        angles = [
+            max(self.min_angle, min(self.max_angle, top_left)),
+            max(self.min_angle, min(self.max_angle, top_right)),
+            max(self.min_angle, min(self.max_angle, bottom_left)),
+            max(self.min_angle, min(self.max_angle, bottom_right))
+        ]
+        
+        return angles
+    
+    def update_servos(self, x_offset, y_offset, has_target=True):
+        """
+        Update servo positions based on target offset with minimum deflection filtering.
+        
+        Args:
+            x_offset: Horizontal offset from center
+            y_offset: Vertical offset from center  
+            has_target: Whether a target is currently detected
+        """
+        if not self.initialized:
+            return
+        
+        if not has_target:
+            # Return to center position when no target
+            target_angles = [self.center_angle] * 4
+        else:
+            # Calculate target angles based on offset
+            target_angles = self.calculate_servo_angles(x_offset, y_offset)
+        
+        # Apply minimum deflection filtering
+        for i, target_angle in enumerate(target_angles):
+            angle_diff = abs(target_angle - self.current_angles[i])
+            
+            if angle_diff >= self.min_deflection:
+                self.current_angles[i] = target_angle
+                
+                if GPIO_AVAILABLE and i < len(self.pwm_objects):
+                    duty_cycle = self.angle_to_duty_cycle(target_angle)
+                    self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
+    
+    def get_servo_status(self):
+        """
+        Get current servo status for debugging.
+        
+        Returns:
+            Dictionary with servo angles and status
+        """
+        return {
+            'angles': self.current_angles.copy(),
+            'pins': self.pins,
+            'initialized': self.initialized,
+            'gpio_available': GPIO_AVAILABLE
+        }
+    
+    def cleanup(self):
+        """Clean up GPIO resources."""
+        if GPIO_AVAILABLE and self.initialized:
+            for pwm in self.pwm_objects:
+                pwm.stop()
+            GPIO.cleanup()
+            print("Servo GPIO cleanup completed")
 
 class StreamingHandler(BaseHTTPRequestHandler):
     """HTTP handler for MJPEG streaming"""
@@ -71,9 +254,10 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 <div class="container">
                     <h1>🎯 Pi Zero Target Tracker Live Stream</h1>
                     <div class="info">
-                        <strong>Status:</strong> Tracking GREEN objects<br>
+                        <strong>Status:</strong> Tracking GREEN objects with servo control<br>
                         <strong>Resolution:</strong> 640x480 (processed from 1280x960 capture)<br>
-                        <strong>Device:</strong> Raspberry Pi Zero 2W
+                        <strong>Device:</strong> Raspberry Pi Zero 2W<br>
+                        <strong>Servos:</strong> 4x servos (45-135° range, center at 90°)
                     </div>
                     <div class="stream">
                         <img src="/stream" alt="Live Stream">
@@ -230,10 +414,15 @@ def video_file_thread(video_path: str, frame_queue: Queue):
 
 def parse_arguments():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Target Tracker with Live Streaming')
+    parser = argparse.ArgumentParser(description='Raspberry Pi Zero 2W Target Tracker with Live Streaming and Servo Control')
     parser.add_argument('--source', type=str, help='MP4 video file to process instead of live camera')
     parser.add_argument('--port', type=int, default=8080, help='HTTP streaming port (default: 8080)')
     parser.add_argument('--no-stream', action='store_true', help='Disable streaming (headless only)')
+    parser.add_argument('--no-servos', action='store_true', help='Disable servo control')
+    parser.add_argument('--servo-pins', nargs=4, type=int, default=[18, 19, 20, 21], 
+                        help='GPIO pins for servos [top_left, top_right, bottom_left, bottom_right] (default: 18 19 20 21)')
+    parser.add_argument('--min-deflection', type=float, default=2.0, 
+                        help='Minimum servo angle change to prevent twitching (default: 2.0 degrees)')
     return parser.parse_args()
 
 def main():
@@ -244,7 +433,7 @@ def main():
     args = parse_arguments()
     
     print("=" * 60)
-    print("RASPBERRY PI ZERO 2W TARGET TRACKER WITH LIVE STREAMING")
+    print("RASPBERRY PI ZERO 2W TARGET TRACKER WITH LIVE STREAMING AND SERVO CONTROL")
     print("=" * 60)
     
     if args.source:
@@ -259,6 +448,12 @@ def main():
         print(f"Live streaming enabled on port {args.port}")
     else:
         print("Streaming disabled - headless mode only")
+    
+    if not args.no_servos:
+        print(f"Servo control enabled on pins {args.servo_pins}")
+        print(f"Minimum deflection threshold: {args.min_deflection}°")
+    else:
+        print("Servo control disabled")
     
     # Configuration for streaming operation
     status_interval = 150   # Print status every N frames
@@ -336,14 +531,31 @@ def main():
     
     capture_thread.start()
     
-    # Step 4: Initialize tracking components
+    # Step 4: Initialize servo controller
+    servo_controller = None
+    if not args.no_servos:
+        try:
+            servo_controller = ServoController(
+                pins=args.servo_pins,
+                min_deflection=args.min_deflection
+            )
+            print("Servo controller initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize servo controller: {e}")
+            servo_controller = None
+    
+    # Step 5: Initialize tracking components
     video_source = args.source if args.source else 0  # 0 for camera, file path for video
     tracker = TargetTracker(result_logger=None, video_source=video_source)  # No result logger
     
-    print("\nTarget tracking with live streaming started!")
+    print("\nTarget tracking with live streaming and servo control started!")
     print(f"Camera FOV: 1280x960 (double resolution for larger field of view)")
     print(f"Processing resolution: 640x480 (maintains Pi Zero workload)")
     print(f"Target: Green objects, min area: {Config.MIN_AREA} pixels")
+    if servo_controller:
+        servo_status = servo_controller.get_servo_status()
+        print(f"Servo control: 4 servos on pins {servo_status['pins']}")
+        print(f"Servo range: 45-135°, center: 90°, min deflection: {args.min_deflection}°")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
         print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
@@ -391,6 +603,10 @@ def main():
             abs_distance, x_offset, y_offset, frame_center_x, frame_center_y = distance_info
             has_detection = (cx != -1 and cy != -1)
             
+            # Update servo positions based on target offset
+            if servo_controller:
+                servo_controller.update_servos(x_offset, y_offset, has_detection and locked)
+            
             # Print status periodically
             if tracker.frame_count % status_interval == 0:
                 print(f"\n--- Frame {tracker.frame_count} Status ---")
@@ -398,8 +614,16 @@ def main():
                     print(f"Target: ({cx}, {cy}) radius={radius}")
                     direction_desc = tracker.get_directional_description(x_offset, y_offset)
                     print(f"Distance: {abs_distance:.1f}px from center - {direction_desc}")
+                    print(f"Offset: ({x_offset:+d}, {y_offset:+d})")
                 else:
                     print("Status: TARGET LOST")
+                
+                # Show servo status
+                if servo_controller:
+                    servo_status = servo_controller.get_servo_status()
+                    angles = servo_status['angles']
+                    print(f"Servos: TL={angles[0]:.1f}° TR={angles[1]:.1f}° BL={angles[2]:.1f}° BR={angles[3]:.1f}°")
+                
                 if streaming_server:
                     pi_ip = get_pi_ip_address()
                     print(f"Stream: http://{pi_ip}:{args.port}")
@@ -410,7 +634,7 @@ def main():
     
     finally:
         # Step 6: Cleanup and final reporting
-        print("Shutting down tracker and streaming...")
+        print("Shutting down tracker, streaming, and servos...")
         
         print(f"\nTotal frames processed: {tracker.frame_count}")
         
@@ -424,7 +648,11 @@ def main():
             streaming_server.shutdown()
             print("Streaming server stopped")
         
-        print("Target tracker with streaming stopped successfully!")
+        # Cleanup servo controller
+        if servo_controller:
+            servo_controller.cleanup()
+        
+        print("Target tracker with streaming and servo control stopped successfully!")
 
 if __name__ == "__main__":
     main() 

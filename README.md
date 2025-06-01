@@ -11,12 +11,16 @@ A single-file target tracking system designed for real-time detection and tracki
 - **Color-based detection**: HSV color thresholding for robust target detection
 - **Temporal tracking**: Exponential moving average smoothing and persistence
 - **Visual feedback**: Real-time visualization with crosshairs and status overlay
+- **Servo control**: 4-servo actuation system with robust anti-twitching algorithms
+- **Live streaming**: HTTP MJPEG streaming for remote monitoring
 
 ## Requirements
 
 - Python 3.7+
 - OpenCV 4.x
 - NumPy
+- RPi.GPIO (for servo control on Raspberry Pi)
+- picamera2 (for Pi camera support)
 
 ## Installation
 
@@ -59,6 +63,11 @@ python3 main_pi.py
 python3 main_pi_zero.py
 ```
 
+**Pi Zero 2W with Live Streaming and Servo Control:**
+```bash
+python3 main_pi_zero_streaming.py
+```
+
 **Headless operation (SSH/remote):**
 ```bash
 python3 main_pi_headless.py
@@ -86,11 +95,19 @@ python target_tracker.py --source demo.mp4 --debug
 USE_PI_CAMERA=1 python target_tracker.py --camera --no-display --csv
 ```
 
-**Live camera streaming (NEW):**
+**Live camera streaming:**
 ```bash
 python3 main_macos.py           # macOS built-in webcam
 python3 main_pi.py              # Raspberry Pi camera (full GUI)
 python3 main_pi_headless.py     # Raspberry Pi camera (headless)
+```
+
+**Pi Zero with servo control and streaming:**
+```bash
+python3 main_pi_zero_streaming.py                    # Full servo control
+python3 main_pi_zero_streaming.py --no-servos        # Disable servos
+python3 main_pi_zero_streaming.py --servo-pins 12 13 16 18  # Custom pins
+python3 main_pi_zero_streaming.py --min-deflection 3.0      # Adjust sensitivity
 ```
 
 **CSV output for data analysis:**
@@ -126,6 +143,46 @@ All parameters can be adjusted in the `Config` class within `target_tracker.py`:
 
 ### Performance Parameters
 - `FRAME_WIDTH/HEIGHT`: Processing resolution (default: 640x480)
+
+## Servo Control System
+
+The Pi Zero streaming version includes a 4-servo control system that responds to target position:
+
+### Hardware Setup
+- **4 servos** connected to GPIO pins (default: 18, 19, 20, 21)
+- **Servo layout**: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+- **Power**: Ensure adequate 5V power supply for servos
+- **Wiring**: Connect servo signal wires to GPIO pins, power to 5V rail
+
+### Servo Behavior
+- **Center position**: All servos at 90° when target is at frame center (320, 240)
+- **Angle range**: 45-135° (90° ± 45°) for maximum deflection at frame edges
+- **Anti-twitching**: Minimum deflection threshold (default: 2°) prevents small movements
+- **Smooth response**: Servos only update when angle change exceeds threshold
+
+### Servo Control Options
+```bash
+# Test servo functionality
+python3 test_servos.py                    # Test all servo movements
+python3 test_servos.py --test center      # Test center position only
+python3 test_servos.py --pins 12 13 16 18 # Use custom GPIO pins
+
+# Main application with servo control
+python3 main_pi_zero_streaming.py --servo-pins 18 19 20 21  # Default pins
+python3 main_pi_zero_streaming.py --min-deflection 3.0     # Reduce sensitivity
+python3 main_pi_zero_streaming.py --no-servos              # Disable servos
+```
+
+### Servo Angle Calculation
+The system maps target position to servo angles using quadrant influence:
+- **Top-Left servo**: Responds to negative X and negative Y offsets
+- **Top-Right servo**: Responds to positive X and negative Y offsets  
+- **Bottom-Left servo**: Responds to negative X and positive Y offsets
+- **Bottom-Right servo**: Responds to positive X and positive Y offsets
+
+Target at frame center (0,0 offset) → All servos at 90°
+Target at top-left corner → TL servo at 135°, others compensate
+Target at bottom-right corner → BR servo at 135°, others compensate
 
 ## Target Specifications
 
@@ -204,6 +261,19 @@ The system is pre-configured for Pi performance:
 - Reduce frame resolution in Config
 - Disable debug visualization
 - Use `--no-display` flag
+
+**Servo control issues**
+- Check GPIO permissions: `sudo usermod -a -G gpio $USER` (logout/login required)
+- Verify servo power supply (5V, adequate current)
+- Test servos individually: `python3 test_servos.py --test center`
+- Check GPIO pin conflicts with other devices
+- Ensure RPi.GPIO is installed: `pip install RPi.GPIO`
+
+**Servos twitching or jittery**
+- Increase minimum deflection threshold: `--min-deflection 3.0`
+- Check power supply stability
+- Verify servo signal wire connections
+- Reduce tracking sensitivity in Config class
 
 ### HSV Color Tuning
 
