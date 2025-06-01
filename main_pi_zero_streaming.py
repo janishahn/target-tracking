@@ -32,7 +32,7 @@ class ServoController:
     Actuates servos only when target is detected with proper smoothing.
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50, smoothing_factor=0.3):
+    def __init__(self, pins=[18, 19, 20, 21], pwm_frequency=50, smoothing_factor=0.25):
         """
         Initialize servo controller for welcome adjustment and target tracking.
         
@@ -333,8 +333,8 @@ class StreamingHandler(BaseHTTPRequestHandler):
                 while True:
                     if hasattr(self.server, 'current_frame') and self.server.current_frame is not None:
                         # Encode frame as JPEG
-                        ret, jpeg = cv2.imencode('.jpg', self.server.current_frame, 
-                                               [cv2.IMWRITE_JPEG_QUALITY, 80])
+                        ret, jpeg = cv2.imencode('.jpg', self.server.current_frame,
+                                               [cv2.IMWRITE_JPEG_QUALITY, 70]) # Lowered quality to 70
                         if ret:
                             self.wfile.write(b'--jpgboundary\r\n')
                             self.send_header('Content-Type', 'image/jpeg')
@@ -343,7 +343,9 @@ class StreamingHandler(BaseHTTPRequestHandler):
                             self.wfile.write(jpeg.tobytes())
                             self.wfile.write(b'\r\n')
                     
-                    time.sleep(0.033)  # ~30 FPS max
+                    # Adjust sleep time based on configured streaming FPS
+                    target_delay = 1.0 / self.server.streaming_fps
+                    time.sleep(target_delay)
                     
             except Exception as e:
                 print(f"Streaming error: {e}")
@@ -424,11 +426,12 @@ def get_pi_ip_address():
     except:
         return "Unable to determine IP"
 
-def start_streaming_server(port=8080):
+def start_streaming_server(port=8080, streaming_fps=20):
     """Start the HTTP streaming server"""
     try:
         server = ThreadingHTTPServer(('0.0.0.0', port), StreamingHandler)
         server.current_frame = None
+        server.streaming_fps = streaming_fps # Store streaming_fps for the handler
         
         # Start server in a separate thread
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -538,6 +541,8 @@ def parse_arguments():
     parser.add_argument('--no-servos', action='store_true', help='Disable servo control')
     parser.add_argument('--servo-pins', nargs=4, type=int, default=[18, 19, 20, 21], 
                         help='GPIO pins for servos [top_left, top_right, bottom_left, bottom_right] (default: 18 19 20 21)')
+    parser.add_argument('--streaming_fps', type=int, default=20,
+                        help='Target FPS for the MJPEG stream (default: 20)')
     return parser.parse_args()
 
 def main():
@@ -583,6 +588,7 @@ def main():
     
     # Increase tracking smoothing to reduce jitter at the source
     Config.SMOOTHING_ALPHA = 0.2  # Reduced from 0.3 to 0.2 for smoother tracking
+    Config.INPUT_IS_BGR = True # Inform tracker that input frames will be BGR
     
     # Configure for GREEN object tracking (default ranges)
     Config.HSV_LOWER1 = (45, 60, 60)    # Green range (conservative)
@@ -610,7 +616,7 @@ def main():
     # Step 1: Start streaming server if enabled
     streaming_server = None
     if not args.no_stream:
-        streaming_server = start_streaming_server(args.port)
+        streaming_server = start_streaming_server(port=args.port, streaming_fps=args.streaming_fps)
         if streaming_server is None:
             print("Warning: Streaming server failed to start, continuing in headless mode")
     

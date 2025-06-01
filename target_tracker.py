@@ -42,14 +42,14 @@ class Config:
     HSV_UPPER2 = (180, 255, 255)
     
     # Detection filtering parameters
-    MIN_AREA = 200              # Minimum contour area in pixels
-    MIN_CIRCULARITY = 0.6       # Minimum circularity (0-1)
-    MAX_DETECTION_RADIUS = 100  # Maximum detection radius in pixels
+    MIN_AREA = 75               # Minimum contour area in pixels
+    MIN_CIRCULARITY = 0.35      # Minimum circularity (0-1)
+    MAX_DETECTION_RADIUS = 150  # Maximum detection radius in pixels
     
     # Tracking parameters
     SMOOTHING_ALPHA = 0.3       # EMA smoothing factor (0-1)
-    MAX_MISSING_FRAMES = 5      # Frames to wait before declaring target lost
-    SEARCH_WINDOW_SIZE = 20     # Pixel radius for tracking window
+    MAX_MISSING_FRAMES = 10     # Frames to wait before declaring target lost
+    SEARCH_WINDOW_SIZE = 30     # Pixel radius for tracking window (60x60 search area)
     
     # Debug and visualization
     DEBUG = True
@@ -60,6 +60,7 @@ class Config:
     # Color format override (set to force specific behavior)
     # None = auto-detect, True = force RGB->BGR conversion, False = force BGR (no conversion)
     FORCE_COLOR_FORMAT = None
+    INPUT_IS_BGR = False # If True, assumes input frames are BGR and skips conversion
     
     # Output configuration
     OUTPUT_CSV = False
@@ -352,7 +353,7 @@ class TargetTracker:
         self.rgb_conversion_buffer = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
         
         # Precompute morphological kernel
-        self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        self.morph_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         
         # Create SimpleBlobDetector for efficient blob detection
         params = cv2.SimpleBlobDetector_Params()
@@ -396,7 +397,7 @@ class TargetTracker:
         # ROI-based search optimization
         self.roi_enabled = False
         self.roi_rect = (0, 0, self.frame_width, self.frame_height)  # x, y, w, h
-        self.frames_since_full_search = 0
+        # self.frames_since_full_search = 0 # Removed, roi_enabled is now the primary flag managed by update_track
     
     def _detect_camera_color_format(self, frame: np.ndarray) -> bool:
         """
@@ -412,8 +413,15 @@ class TargetTracker:
         """
         if self.color_format_detected:
             return self.needs_rgb_to_bgr_conversion
-        
-        # Check for manual override first
+
+        # Check for INPUT_IS_BGR flag first
+        if Config.INPUT_IS_BGR:
+            self.needs_rgb_to_bgr_conversion = False
+            self.color_format_detected = True
+            print(f"🔴 Camera color format OVERRIDDEN by INPUT_IS_BGR: BGR (no conversion)")
+            return self.needs_rgb_to_bgr_conversion
+
+        # Check for manual override
         if Config.FORCE_COLOR_FORMAT is not None:
             self.needs_rgb_to_bgr_conversion = Config.FORCE_COLOR_FORMAT
             self.color_format_detected = True
@@ -496,8 +504,15 @@ class TargetTracker:
             source_frame = frame
         
         # Resize frame to configured dimensions using pre-allocated buffer
-        cv2.resize(source_frame, (self.frame_width, self.frame_height), dst=self.bgr_frame_prealloc)
-        
+        # Skip resize if already correct size
+        if source_frame.shape[1] != self.frame_width or source_frame.shape[0] != self.frame_height:
+            cv2.resize(source_frame, (self.frame_width, self.frame_height), dst=self.bgr_frame_prealloc)
+        else:
+            # If no resize is needed, copy to prealloc buffer if it's not already the source
+            # This happens if no RGB conversion occurred and no resize is needed.
+            if source_frame is not self.bgr_frame_prealloc:
+                 np.copyto(self.bgr_frame_prealloc, source_frame)
+
         # Optional Gaussian blur for noise reduction (only in debug mode)
         if Config.DEBUG:
             cv2.GaussianBlur(self.bgr_frame_prealloc, (5, 5), 0, dst=self.bgr_frame_prealloc)
@@ -530,7 +545,7 @@ class TargetTracker:
         cv2.morphologyEx(self.mask_prealloc, cv2.MORPH_OPEN, self.morph_kernel, dst=self.mask_prealloc)
         
         # Close: fills small holes (optional)
-        cv2.morphologyEx(self.mask_prealloc, cv2.MORPH_CLOSE, self.morph_kernel, dst=self.mask_prealloc)
+        # cv2.morphologyEx(self.mask_prealloc, cv2.MORPH_CLOSE, self.morph_kernel, dst=self.mask_prealloc)
         
         return self.mask_prealloc
     
@@ -557,172 +572,136 @@ class TargetTracker:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.morph_kernel)
         
         # Close: fills small holes (optional)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.morph_kernel)
         
         return mask
     
-    def find_candidate(self, mask: np.ndarray) -> Optional[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], np.ndarray]]:
+    def find_candidate(self, mask: np.ndarray) -> List[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], Optional[np.ndarray]]]:
         """
-        Find the best target candidate from binary mask using SimpleBlobDetector.
+        Find all target candidates from binary mask using SimpleBlobDetector.
         
         Args:
             mask: Binary mask (uint8, 0 or 255)
             
         Returns:
-            Best candidate as ((x, y), radius, area, bbox, contour) or None if no valid candidate
-            bbox format: (x, y, w, h) - top-left corner and dimensions
-            Note: contour is None since SimpleBlobDetector doesn't provide contours
+            List of candidates, each as ((x, y), radius, area, bbox, contour).
+            Sorted by area in descending order (largest first).
+            bbox format: (x, y, w, h) - top-left corner and dimensions.
+            Contour is None as SimpleBlobDetector doesn't provide contours.
+            Returns an empty list if no blobs are found.
         """
-        # Use SimpleBlobDetector for efficient blob detection
         keypoints = self.blob_detector.detect(mask)
-        
         if not keypoints:
-            return None
+            return []
         
-        # Select the largest keypoint by size (diameter)
-        best_kp = max(keypoints, key=lambda kp: kp.size)
+        candidates_list = []
+        for kp in keypoints:
+            x, y = kp.pt
+            radius = kp.size / 2.0
+            area_est = np.pi * radius * radius
+
+            bbox_x = int(x - radius)
+            bbox_y = int(y - radius)
+            bbox_w = int(2 * radius)
+            bbox_h = int(2 * radius)
+
+            candidates_list.append(((int(x), int(y)), int(radius), area_est, (bbox_x, bbox_y, bbox_w, bbox_h), None))
         
-        # Extract blob properties
-        x, y = best_kp.pt
-        radius = best_kp.size / 2.0
-        area_est = np.pi * radius * radius
-        
-        # Create bounding box from circle
-        bbox_x = int(x - radius)
-        bbox_y = int(y - radius)
-        bbox_w = int(2 * radius)
-        bbox_h = int(2 * radius)
-        
-        # Return (centroid, radius, area, bbox, contour)
-        # Note: contour is None since SimpleBlobDetector doesn't provide contours
-        return ((int(x), int(y)), int(radius), area_est, (bbox_x, bbox_y, bbox_w, bbox_h), None)
-    
-    def update_track(self, candidate: Optional[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], np.ndarray]]):
+        # Sort by area in descending order (largest first)
+        candidates_list.sort(key=lambda c: c[2], reverse=True)
+        return candidates_list
+
+    def update_track(self, candidates: List[Tuple[Tuple[int, int], int, float, Tuple[int, int, int, int], Optional[np.ndarray]]]):
         """
-        Update tracking state based on detection candidate.
+        Update tracking state based on a list of potential candidates, implementing "target stickiness".
         
         Args:
-            candidate: Best candidate from find_candidate or None
+            candidates: List of potential candidates from find_candidate, sorted by area (largest first).
         """
-        if candidate is not None:
-            (x, y), radius, area, bbox, contour = candidate
-            bbox_x, bbox_y, bbox_w, bbox_h = bbox
+        chosen_candidate_data = None  # This will store the raw ((x,y), radius, area, bbox, contour)
+
+        if self.locked and self.smoothed_centroid is not None:
+            sticky_candidates_info = []
+            search_window_sq = Config.SEARCH_WINDOW_SIZE ** 2 # Squared search window for efficiency
+
+            for cand_tuple in candidates:
+                cand_centroid = cand_tuple[0]
+                dist_x = cand_centroid[0] - self.smoothed_centroid[0]
+                dist_y = cand_centroid[1] - self.smoothed_centroid[1]
+                dist_sq = dist_x**2 + dist_y**2
+
+                if dist_sq <= search_window_sq:
+                    sticky_candidates_info.append({'candidate_tuple': cand_tuple, 'distance_sq': dist_sq})
             
-            # Check if this is first detection or within search window
-            if (self.last_centroid is None or 
-                self._is_within_search_window((x, y))):
+            if sticky_candidates_info:
+                # Prioritize the closest candidate within the window
+                sticky_candidates_info.sort(key=lambda sc: sc['distance_sq'])
+                chosen_candidate_data = sticky_candidates_info[0]['candidate_tuple']
+
+        elif candidates: # Not locked, but candidates are available (acquisition/re-acquisition)
+            # Choose the largest candidate (candidates are pre-sorted by area by find_candidate)
+            chosen_candidate_data = candidates[0]
+
+        if chosen_candidate_data:
+            (x, y), radius, area, bbox, contour = chosen_candidate_data
+            bbox_x, bbox_y, bbox_w, bbox_h = bbox # Unpack for clarity
+
+            if not self.locked or self.smoothed_centroid is None: # First detection or re-acquisition after loss
+                self.smoothed_centroid = (float(x), float(y))
+                self.smoothed_radius = float(radius)
+                self.smoothed_bbox = (float(bbox_x), float(bbox_y), float(bbox_w), float(bbox_h))
+                self.lock_duration = 1 # Start lock duration
+            else: # Apply exponential moving average (EMA) for existing lock
+                new_cx = (1 - self.alpha) * self.smoothed_centroid[0] + self.alpha * x
+                new_cy = (1 - self.alpha) * self.smoothed_centroid[1] + self.alpha * y
+                self.smoothed_centroid = (new_cx, new_cy)
                 
-                # Update tracking state
-                if self.last_centroid is None:
-                    # First detection ever
-                    self.smoothed_centroid = (float(x), float(y))
-                    self.smoothed_radius = float(radius)
-                    self.smoothed_bbox = (float(bbox_x), float(bbox_y), float(bbox_w), float(bbox_h))
-                else:
-                    # Apply exponential moving average (EMA)
-                    new_cx = (1 - self.alpha) * self.smoothed_centroid[0] + self.alpha * x
-                    new_cy = (1 - self.alpha) * self.smoothed_centroid[1] + self.alpha * y
-                    new_r = (1 - self.alpha) * self.smoothed_radius + self.alpha * radius
-                    
-                    # Smooth bounding box coordinates
-                    new_bx = (1 - self.alpha) * self.smoothed_bbox[0] + self.alpha * bbox_x
-                    new_by = (1 - self.alpha) * self.smoothed_bbox[1] + self.alpha * bbox_y
-                    new_bw = (1 - self.alpha) * self.smoothed_bbox[2] + self.alpha * bbox_w
-                    new_bh = (1 - self.alpha) * self.smoothed_bbox[3] + self.alpha * bbox_h
-                    
-                    self.smoothed_centroid = (new_cx, new_cy)
-                    self.smoothed_radius = new_r
-                    self.smoothed_bbox = (new_bx, new_by, new_bw, new_bh)
+                new_r = (1 - self.alpha) * self.smoothed_radius + self.alpha * radius
+                self.smoothed_radius = new_r
                 
-                # Update state
-                self.last_centroid = self.smoothed_centroid
-                self.last_radius = self.smoothed_radius
-                self.last_bbox = self.smoothed_bbox
-                self.last_contour = contour
-                self.missing_frames = 0
-                self.locked = True
-                
-                if self.lock_duration == 0:
-                    self.lock_duration = 1
-                else:
-                    self.lock_duration += 1
-                
-                # Update ROI for next frame
-                center_x, center_y = int(self.smoothed_centroid[0]), int(self.smoothed_centroid[1])
-                half_win = Config.SEARCH_WINDOW_SIZE
-                new_x = max(0, center_x - half_win)
-                new_y = max(0, center_y - half_win)
-                new_w = min(self.frame_width - new_x, 2 * half_win)
-                new_h = min(self.frame_height - new_y, 2 * half_win)
-                self.roi_rect = (new_x, new_y, new_w, new_h)
-                self.roi_enabled = True
-                self.frames_since_full_search = 0
-                    
-            else:
-                # Detection is far from previous centroid
-                # For simplicity: treat as reacquisition if area is significantly larger
-                if (self.last_radius > 0 and 
-                    area > 2 * (np.pi * self.last_radius ** 2)):
-                    # Large area suggests this might be the same target
-                    # Accept as reacquisition
-                    self.smoothed_centroid = (float(x), float(y))
-                    self.smoothed_radius = float(radius)
-                    self.smoothed_bbox = (float(bbox_x), float(bbox_y), float(bbox_w), float(bbox_h))
-                    self.last_centroid = self.smoothed_centroid
-                    self.last_radius = self.smoothed_radius
-                    self.last_bbox = self.smoothed_bbox
-                    self.last_contour = contour
-                    self.missing_frames = 0
-                    self.locked = True
-                    self.lock_duration = 1
-                    
-                    # Update ROI for reacquisition
-                    center_x, center_y = int(self.smoothed_centroid[0]), int(self.smoothed_centroid[1])
-                    half_win = Config.SEARCH_WINDOW_SIZE
-                    new_x = max(0, center_x - half_win)
-                    new_y = max(0, center_y - half_win)
-                    new_w = min(self.frame_width - new_x, 2 * half_win)
-                    new_h = min(self.frame_height - new_y, 2 * half_win)
-                    self.roi_rect = (new_x, new_y, new_w, new_h)
-                    self.roi_enabled = True
-                    self.frames_since_full_search = 0
-                else:
-                    # Ignore this detection, increment missing frames
-                    self.missing_frames += 1
-                    self.frames_since_full_search += 1
-                    if self.missing_frames > Config.MAX_MISSING_FRAMES:
-                        self.locked = False
-                        self.lock_duration = 0
-                        self.last_centroid = None
-                        self.smoothed_centroid = None
-                        self.last_bbox = None
-                        self.smoothed_bbox = None
-                        self.last_contour = None
-                        self.roi_enabled = False
-        else:
-            # No candidate this frame
+                new_bx = (1 - self.alpha) * self.smoothed_bbox[0] + self.alpha * bbox_x
+                new_by = (1 - self.alpha) * self.smoothed_bbox[1] + self.alpha * bbox_y
+                new_bw = (1 - self.alpha) * self.smoothed_bbox[2] + self.alpha * bbox_w
+                new_bh = (1 - self.alpha) * self.smoothed_bbox[3] + self.alpha * bbox_h
+                self.smoothed_bbox = (new_bx, new_by, new_bw, new_bh)
+                self.lock_duration += 1
+
+            # Update state based on (potentially smoothed) chosen candidate
+            self.last_centroid = self.smoothed_centroid # Store smoothed values as "last known good"
+            self.last_radius = self.smoothed_radius
+            self.last_bbox = self.smoothed_bbox
+            self.last_contour = contour # Still None from SimpleBlobDetector
+
+            self.missing_frames = 0
+            self.locked = True
+
+            # Update ROI for next frame based on the new smoothed centroid
+            center_x_roi, center_y_roi = int(self.smoothed_centroid[0]), int(self.smoothed_centroid[1])
+            half_win_roi = Config.SEARCH_WINDOW_SIZE
+            roi_x = max(0, center_x_roi - half_win_roi)
+            roi_y = max(0, center_y_roi - half_win_roi)
+            roi_w = min(self.frame_width - roi_x, 2 * half_win_roi)
+            roi_h = min(self.frame_height - roi_y, 2 * half_win_roi)
+            self.roi_rect = (roi_x, roi_y, roi_w, roi_h)
+            self.roi_enabled = True
+
+        else: # No candidate chosen (either no sticky ones, or no candidates at all)
             self.missing_frames += 1
-            self.frames_since_full_search += 1
-            if self.missing_frames > Config.MAX_MISSING_FRAMES:
-                self.locked = False
-                self.lock_duration = 0
-                self.last_centroid = None
-                self.smoothed_centroid = None
-                self.last_bbox = None
-                self.smoothed_bbox = None
-                self.last_contour = None
-                self.roi_enabled = False
-    
-    def _is_within_search_window(self, new_centroid: Tuple[int, int]) -> bool:
-        """Check if new detection is within search window of last known position"""
-        if self.last_centroid is None:
-            return True
-        
-        dx = new_centroid[0] - self.last_centroid[0]
-        dy = new_centroid[1] - self.last_centroid[1]
-        distance = np.sqrt(dx*dx + dy*dy)
-        
-        return distance <= Config.SEARCH_WINDOW_SIZE
+
+        # Common logic for losing lock due to too many missed frames
+        if self.missing_frames > Config.MAX_MISSING_FRAMES:
+            self.locked = False
+            self.lock_duration = 0
+            self.last_centroid = None
+            self.smoothed_centroid = None
+            self.last_radius = 0
+            self.smoothed_radius = 0
+            self.last_bbox = None
+            self.smoothed_bbox = None
+            self.last_contour = None
+            self.roi_enabled = False # Fall back to full search
+
+    # _is_within_search_window can be removed as its logic is integrated or replaced.
     
     def get_state(self) -> Tuple[int, int, int, bool, Tuple[int, int, int, int]]:
         """
@@ -967,9 +946,10 @@ class TargetTracker:
         # Step 1: Preprocess frame
         frame_proc = self.preprocess(frame)
         
-        # Step 2: Two-stage masking (ROI-based or full-frame)
-        if self.roi_enabled and self.frames_since_full_search < Config.MAX_MISSING_FRAMES:
-            # Stage A: ROI-based search
+        # Step 2: Masking (ROI-based or full-frame)
+        # The roi_enabled flag is now managed by update_track based on MAX_MISSING_FRAMES
+        if self.roi_enabled:
+            # ROI-based search
             x, y, w, h = self.roi_rect
             
             # Extract ROI from BGR frame
@@ -982,24 +962,22 @@ class TargetTracker:
             mask_roi = self._compute_roi_mask(sub_hsv)
             
             # Create full mask with zeros and copy ROI mask back
-            self.mask_prealloc[:] = 0
+            self.mask_prealloc[:] = 0 # Clear previous mask
             self.mask_prealloc[y:y+h, x:x+w] = mask_roi
             
-            mask = self.mask_prealloc
+            mask_to_use = self.mask_prealloc
         else:
-            # Stage A: Full-frame search
+            # Full-frame search
             cv2.cvtColor(frame_proc, cv2.COLOR_BGR2HSV, dst=self.hsv_frame)
-            mask = self.compute_mask(self.hsv_frame)
-            
-            # Reset ROI search counter after full search
-            self.frames_since_full_search = 0
-            self.roi_enabled = False
+            mask_to_use = self.compute_mask(self.hsv_frame)
+            # If we did a full search, roi_enabled would have been false.
+            # update_track will set it true if a target is acquired.
         
-        # Step 4: Find best candidate
-        candidate = self.find_candidate(mask)
+        # Step 4: Find candidates (plural)
+        candidates = self.find_candidate(mask_to_use) # Expects a list
         
-        # Step 5: Update tracking
-        self.update_track(candidate)
+        # Step 5: Update tracking with list of candidates
+        self.update_track(candidates)
         
         # Step 6: Get state for output
         cx, cy, radius, locked, bbox = self.get_state()
