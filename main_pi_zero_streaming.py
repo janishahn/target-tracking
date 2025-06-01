@@ -221,6 +221,9 @@ class ServoController:
             if current_time - self.last_update_time < self.min_update_interval:
                 return
             
+            # Update timestamp to enforce rate limit regardless of servo movement
+            self.last_update_time = current_time
+            
             # Apply additional position smoothing
             smooth_x, smooth_y = self.smooth_position(x_offset, y_offset)
             
@@ -228,7 +231,6 @@ class ServoController:
             self.target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
             
             # Apply servo-level smoothing and minimum deflection filtering
-            servo_updated = False
             for i, target_angle in enumerate(self.target_angles):
                 # Smooth transition to target angle
                 angle_diff = target_angle - self.current_angles[i]
@@ -242,15 +244,10 @@ class ServoController:
                     smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
                     
                     self.current_angles[i] = smoothed_angle
-                    servo_updated = True
                     
                     if GPIO_AVAILABLE and i < len(self.pwm_objects):
                         duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
                         self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
-            
-            # Update timestamp only if servos were actually updated
-            if servo_updated:
-                self.last_update_time = current_time
                 
         else:
             # No target - handle transition to center
