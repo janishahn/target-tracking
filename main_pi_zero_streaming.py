@@ -32,8 +32,8 @@ class ServoController:
     Servo layout: Top-Left, Top-Right, Bottom-Left, Bottom-Right
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], min_deflection=2.0, pwm_frequency=50, 
-                 servo_smoothing=0.15, update_rate_limit=10):
+    def __init__(self, pins=[18, 19, 20, 21], min_deflection=3.0, pwm_frequency=50, 
+                 servo_smoothing=0.15, update_rate_limit=10, center_delay=5):
         """
         Initialize servo controller.
         
@@ -43,6 +43,7 @@ class ServoController:
             pwm_frequency: PWM frequency in Hz (typically 50Hz for servos)
             servo_smoothing: Smoothing factor for servo movements (0-1, lower = smoother)
             update_rate_limit: Maximum servo updates per second
+            center_delay: Frames to wait before returning to center when target is lost
         """
         self.pins = pins
         self.min_deflection = min_deflection
@@ -73,6 +74,11 @@ class ServoController:
         self.position_history = []
         self.max_history_length = 5
         
+        # Target state tracking
+        self.last_target_state = False  # Track previous target state
+        self.frames_without_target = 0   # Count frames without target
+        self.center_return_threshold = center_delay # Frames to wait before returning to center
+        
         self.initialized = False
         self.initialize_servos()
     
@@ -98,6 +104,7 @@ class ServoController:
             print(f"Minimum deflection threshold: {self.min_deflection}°")
             print(f"Servo smoothing factor: {self.servo_smoothing}")
             print(f"Update rate limit: {self.update_rate_limit} Hz")
+            print(f"Center return delay: {self.center_return_threshold} frames")
             self.initialized = True
             
         except Exception as e:
@@ -198,38 +205,103 @@ class ServoController:
         Args:
             x_offset: Horizontal offset from center
             y_offset: Vertical offset from center  
-            has_target: Whether a target is currently detected
+            has_target: Whether a target is currently detected and locked
         """
         if not self.initialized:
             return
         
-        # Rate limiting - only update servos at specified rate
-        current_time = time.time()
-        if current_time - self.last_update_time < self.min_update_interval:
-            return
-        
-        if not has_target:
-            # Return to center position when no target
-            self.target_angles = [self.center_angle] * 4
-            # Clear position history when target is lost
-            self.position_history.clear()
-        else:
+        # Handle target state transitions
+        if has_target:
+            # Target is present - reset counters and update servos
+            self.frames_without_target = 0
+            self.last_target_state = True
+            
+            # Rate limiting - only update servos at specified rate
+            current_time = time.time()
+            if current_time - self.last_update_time < self.min_update_interval:
+                return
+            
             # Apply additional position smoothing
             smooth_x, smooth_y = self.smooth_position(x_offset, y_offset)
             
             # Calculate target angles based on smoothed offset
             self.target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
+            
+            # Apply servo-level smoothing and minimum deflection filtering
+            servo_updated = False
+            for i, target_angle in enumerate(self.target_angles):
+                # Smooth transition to target angle
+                angle_diff = target_angle - self.current_angles[i]
+                
+                # Only update if change is significant enough
+                if abs(angle_diff) >= self.min_deflection:
+                    # Apply exponential smoothing for gradual movement
+                    smoothed_angle = self.current_angles[i] + (angle_diff * self.servo_smoothing)
+                    
+                    # Clamp to valid range
+                    smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
+                    
+                    self.current_angles[i] = smoothed_angle
+                    servo_updated = True
+                    
+                    if GPIO_AVAILABLE and i < len(self.pwm_objects):
+                        duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
+                        self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
+            
+            # Update timestamp only if servos were actually updated
+            if servo_updated:
+                self.last_update_time = current_time
+                
+        else:
+            # No target - handle transition to center
+            self.frames_without_target += 1
+            
+            # Clear position history when target is lost
+            self.position_history.clear()
+            
+            # Only return to center after a delay and if we previously had a target
+            if (self.last_target_state and 
+                self.frames_without_target >= self.center_return_threshold):
+                
+                # Attempt to return to center (rate limited)
+                center_updated = self.return_to_center()
+                
+                # Check if we're close enough to center to stop updates
+                max_deviation = max(abs(angle - self.center_angle) for angle in self.current_angles)
+                if max_deviation < self.min_deflection:
+                    self.last_target_state = False  # Mark as centered, stop updates
+    
+    def return_to_center(self, force=False):
+        """
+        Explicitly return servos to center position when target is lost.
+        Only called when transitioning from target found to target lost.
         
-        # Apply servo-level smoothing and minimum deflection filtering
+        Args:
+            force: If True, ignore rate limiting and deflection thresholds
+        """
+        if not self.initialized:
+            return
+        
+        if not force:
+            # Rate limiting for normal center return
+            current_time = time.time()
+            if current_time - self.last_update_time < self.min_update_interval:
+                return
+        
+        # Set target to center for all servos
+        center_targets = [self.center_angle] * 4
         servo_updated = False
-        for i, target_angle in enumerate(self.target_angles):
-            # Smooth transition to target angle
+        
+        for i, target_angle in enumerate(center_targets):
             angle_diff = target_angle - self.current_angles[i]
             
-            # Only update if change is significant enough
-            if abs(angle_diff) >= self.min_deflection:
-                # Apply exponential smoothing for gradual movement
-                smoothed_angle = self.current_angles[i] + (angle_diff * self.servo_smoothing)
+            # Use larger threshold for center return to avoid micro-movements
+            min_threshold = self.min_deflection if not force else 0.5
+            
+            if abs(angle_diff) >= min_threshold:
+                # Slower smoothing for center return (more gradual)
+                center_smoothing = self.servo_smoothing * 0.5  # Half speed for center return
+                smoothed_angle = self.current_angles[i] + (angle_diff * center_smoothing)
                 
                 # Clamp to valid range
                 smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
@@ -241,9 +313,10 @@ class ServoController:
                     duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
                     self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
         
-        # Update timestamp only if servos were actually updated
         if servo_updated:
-            self.last_update_time = current_time
+            self.last_update_time = time.time()
+        
+        return servo_updated
     
     def get_servo_status(self):
         """
@@ -488,12 +561,14 @@ def parse_arguments():
     parser.add_argument('--no-servos', action='store_true', help='Disable servo control')
     parser.add_argument('--servo-pins', nargs=4, type=int, default=[18, 19, 20, 21], 
                         help='GPIO pins for servos [top_left, top_right, bottom_left, bottom_right] (default: 18 19 20 21)')
-    parser.add_argument('--min-deflection', type=float, default=2.0, 
-                        help='Minimum servo angle change to prevent twitching (default: 2.0 degrees)')
+    parser.add_argument('--min-deflection', type=float, default=3.0, 
+                        help='Minimum servo angle change to prevent twitching (default: 3.0 degrees)')
     parser.add_argument('--servo-smoothing', type=float, default=0.15, 
                         help='Servo smoothing factor (0-1, lower = smoother, default: 0.15)')
     parser.add_argument('--servo-rate', type=int, default=10, 
                         help='Maximum servo updates per second (default: 10 Hz)')
+    parser.add_argument('--center-delay', type=int, default=5, 
+                        help='Frames to wait before returning to center when target is lost (default: 5)')
     return parser.parse_args()
 
 def main():
@@ -615,7 +690,8 @@ def main():
                 pins=args.servo_pins,
                 min_deflection=args.min_deflection,
                 servo_smoothing=args.servo_smoothing,
-                update_rate_limit=args.servo_rate
+                update_rate_limit=args.servo_rate,
+                center_delay=args.center_delay
             )
             print("Servo controller initialized successfully")
         except Exception as e:
