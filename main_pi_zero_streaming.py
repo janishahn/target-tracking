@@ -32,7 +32,8 @@ class ServoController:
     Servo layout: Top-Left, Top-Right, Bottom-Left, Bottom-Right
     """
     
-    def __init__(self, pins=[18, 19, 20, 21], min_deflection=2.0, pwm_frequency=50):
+    def __init__(self, pins=[18, 19, 20, 21], min_deflection=2.0, pwm_frequency=50, 
+                 servo_smoothing=0.15, update_rate_limit=10):
         """
         Initialize servo controller.
         
@@ -40,11 +41,17 @@ class ServoController:
             pins: GPIO pins for servos [top_left, top_right, bottom_left, bottom_right]
             min_deflection: Minimum angle change required to update servo (degrees)
             pwm_frequency: PWM frequency in Hz (typically 50Hz for servos)
+            servo_smoothing: Smoothing factor for servo movements (0-1, lower = smoother)
+            update_rate_limit: Maximum servo updates per second
         """
         self.pins = pins
         self.min_deflection = min_deflection
         self.pwm_frequency = pwm_frequency
+        self.servo_smoothing = servo_smoothing
+        self.update_rate_limit = update_rate_limit
+        
         self.current_angles = [90.0, 90.0, 90.0, 90.0]  # Start at center position
+        self.target_angles = [90.0, 90.0, 90.0, 90.0]   # Target angles for smoothing
         self.pwm_objects = []
         
         # Frame dimensions for offset calculations
@@ -57,6 +64,14 @@ class ServoController:
         self.min_angle = 45.0
         self.max_angle = 135.0
         self.center_angle = 90.0
+        
+        # Rate limiting
+        self.last_update_time = 0
+        self.min_update_interval = 1.0 / update_rate_limit
+        
+        # Enhanced tracking smoothing
+        self.position_history = []
+        self.max_history_length = 5
         
         self.initialized = False
         self.initialize_servos()
@@ -81,6 +96,8 @@ class ServoController:
             print(f"Servos initialized on pins {self.pins}")
             print(f"Servo range: {self.min_angle}° - {self.max_angle}°")
             print(f"Minimum deflection threshold: {self.min_deflection}°")
+            print(f"Servo smoothing factor: {self.servo_smoothing}")
+            print(f"Update rate limit: {self.update_rate_limit} Hz")
             self.initialized = True
             
         except Exception as e:
@@ -148,9 +165,35 @@ class ServoController:
         
         return angles
     
+    def smooth_position(self, x_offset, y_offset):
+        """
+        Apply additional smoothing to position data using moving average.
+        
+        Args:
+            x_offset: Horizontal offset from center
+            y_offset: Vertical offset from center
+            
+        Returns:
+            Smoothed (x_offset, y_offset) tuple
+        """
+        # Add current position to history
+        self.position_history.append((x_offset, y_offset))
+        
+        # Limit history length
+        if len(self.position_history) > self.max_history_length:
+            self.position_history.pop(0)
+        
+        # Calculate moving average
+        if len(self.position_history) > 1:
+            avg_x = sum(pos[0] for pos in self.position_history) / len(self.position_history)
+            avg_y = sum(pos[1] for pos in self.position_history) / len(self.position_history)
+            return int(avg_x), int(avg_y)
+        else:
+            return x_offset, y_offset
+    
     def update_servos(self, x_offset, y_offset, has_target=True):
         """
-        Update servo positions based on target offset with minimum deflection filtering.
+        Update servo positions based on target offset with enhanced smoothing and rate limiting.
         
         Args:
             x_offset: Horizontal offset from center
@@ -160,23 +203,47 @@ class ServoController:
         if not self.initialized:
             return
         
+        # Rate limiting - only update servos at specified rate
+        current_time = time.time()
+        if current_time - self.last_update_time < self.min_update_interval:
+            return
+        
         if not has_target:
             # Return to center position when no target
-            target_angles = [self.center_angle] * 4
+            self.target_angles = [self.center_angle] * 4
+            # Clear position history when target is lost
+            self.position_history.clear()
         else:
-            # Calculate target angles based on offset
-            target_angles = self.calculate_servo_angles(x_offset, y_offset)
-        
-        # Apply minimum deflection filtering
-        for i, target_angle in enumerate(target_angles):
-            angle_diff = abs(target_angle - self.current_angles[i])
+            # Apply additional position smoothing
+            smooth_x, smooth_y = self.smooth_position(x_offset, y_offset)
             
-            if angle_diff >= self.min_deflection:
-                self.current_angles[i] = target_angle
+            # Calculate target angles based on smoothed offset
+            self.target_angles = self.calculate_servo_angles(smooth_x, smooth_y)
+        
+        # Apply servo-level smoothing and minimum deflection filtering
+        servo_updated = False
+        for i, target_angle in enumerate(self.target_angles):
+            # Smooth transition to target angle
+            angle_diff = target_angle - self.current_angles[i]
+            
+            # Only update if change is significant enough
+            if abs(angle_diff) >= self.min_deflection:
+                # Apply exponential smoothing for gradual movement
+                smoothed_angle = self.current_angles[i] + (angle_diff * self.servo_smoothing)
+                
+                # Clamp to valid range
+                smoothed_angle = max(self.min_angle, min(self.max_angle, smoothed_angle))
+                
+                self.current_angles[i] = smoothed_angle
+                servo_updated = True
                 
                 if GPIO_AVAILABLE and i < len(self.pwm_objects):
-                    duty_cycle = self.angle_to_duty_cycle(target_angle)
+                    duty_cycle = self.angle_to_duty_cycle(smoothed_angle)
                     self.pwm_objects[i].ChangeDutyCycle(duty_cycle)
+        
+        # Update timestamp only if servos were actually updated
+        if servo_updated:
+            self.last_update_time = current_time
     
     def get_servo_status(self):
         """
@@ -423,6 +490,10 @@ def parse_arguments():
                         help='GPIO pins for servos [top_left, top_right, bottom_left, bottom_right] (default: 18 19 20 21)')
     parser.add_argument('--min-deflection', type=float, default=2.0, 
                         help='Minimum servo angle change to prevent twitching (default: 2.0 degrees)')
+    parser.add_argument('--servo-smoothing', type=float, default=0.15, 
+                        help='Servo smoothing factor (0-1, lower = smoother, default: 0.15)')
+    parser.add_argument('--servo-rate', type=int, default=10, 
+                        help='Maximum servo updates per second (default: 10 Hz)')
     return parser.parse_args()
 
 def main():
@@ -452,6 +523,8 @@ def main():
     if not args.no_servos:
         print(f"Servo control enabled on pins {args.servo_pins}")
         print(f"Minimum deflection threshold: {args.min_deflection}°")
+        print(f"Servo smoothing factor: {args.servo_smoothing}")
+        print(f"Servo update rate: {args.servo_rate} Hz")
     else:
         print("Servo control disabled")
     
@@ -466,6 +539,9 @@ def main():
     Config.SHOW_MASK = False
     Config.DEBUG = False
     Config.ENABLE_RESULT_LOGGING = False  # Disable the built-in logging
+    
+    # Increase tracking smoothing to reduce jitter at the source
+    Config.SMOOTHING_ALPHA = 0.2  # Reduced from 0.3 to 0.2 for smoother tracking
     
     # Configure for GREEN object tracking (default ranges)
     Config.HSV_LOWER1 = (45, 60, 60)    # Green range (conservative)
@@ -537,7 +613,9 @@ def main():
         try:
             servo_controller = ServoController(
                 pins=args.servo_pins,
-                min_deflection=args.min_deflection
+                min_deflection=args.min_deflection,
+                servo_smoothing=args.servo_smoothing,
+                update_rate_limit=args.servo_rate
             )
             print("Servo controller initialized successfully")
         except Exception as e:
@@ -556,6 +634,7 @@ def main():
         servo_status = servo_controller.get_servo_status()
         print(f"Servo control: 4 servos on pins {servo_status['pins']}")
         print(f"Servo range: 45-135°, center: 90°, min deflection: {args.min_deflection}°")
+        print(f"Servo smoothing: {args.servo_smoothing}, update rate: {args.servo_rate} Hz")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")
         print(f"HSV ranges: {Config.HSV_LOWER1}-{Config.HSV_UPPER1} and {Config.HSV_LOWER2}-{Config.HSV_UPPER2}")
