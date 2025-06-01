@@ -26,7 +26,7 @@ def create_advanced_demo_video(filename="demo.mp4", duration=20, fps=30):
         fps: Frames per second
     """
     # Video properties
-    width, height = 640, 480
+    width, height = 1280, 960
     total_frames = duration * fps
     
     # Target properties
@@ -218,7 +218,7 @@ def create_occlusion_test_video(filename="demo_occlusion.mp4", duration=15, fps=
     """
     Create a specialized video focusing on occlusion scenarios.
     """
-    width, height = 640, 480
+    width, height = 1280, 960
     total_frames = duration * fps
     
     fourcc = cv2.VideoWriter_fourcc(*'XVID')

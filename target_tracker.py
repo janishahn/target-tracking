@@ -30,8 +30,8 @@ class Config:
         VIDEO_SOURCE = 0  # Pi's camera index
     
     # Frame dimensions (scaled down for Pi performance)
-    FRAME_WIDTH = 320
-    FRAME_HEIGHT = 240
+    FRAME_WIDTH = 640
+    FRAME_HEIGHT = 480
     
     # HSV color thresholds for red target detection
     # Red color wraps around in HSV, so we need two ranges

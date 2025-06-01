@@ -26,8 +26,8 @@ def initialize_webcam() -> cv2.VideoCapture:
             print(f"Camera found at index {camera_index}")
             
             # Configure camera properties for optimal performance
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)   # High resolution for macOS
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)   # 720p should work well
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)   # High resolution for macOS
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)  # 1440p should work well
             cap.set(cv2.CAP_PROP_FPS, 30)             # Target 30 FPS
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)       # Minimal buffer for low latency
             

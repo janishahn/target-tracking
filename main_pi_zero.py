@@ -191,31 +191,31 @@ def initialize_camera_pi_zero() -> Picamera2:
     picam2 = Picamera2()
     
     # Configure camera to capture at double resolution for larger field of view
-    # We'll downsample to 320x240 for processing to maintain Pi Zero workload
+    # We'll downsample to 640x480 for processing to maintain Pi Zero workload
     camera_config = picam2.create_video_configuration(
-        main={"size": (640, 480), "format": "RGB888"},
+        main={"size": (1280, 960), "format": "RGB888"},
         buffer_count=2
     )
     picam2.configure(camera_config)
     picam2.start()
     
-    print("Camera initialized successfully (640x480 capture -> 320x240 processing)")
+    print("Camera initialized successfully (1280x960 capture -> 640x480 processing)")
     return picam2
 
 def camera_capture_thread(picam2: Picamera2, frame_queue: Queue):
     """
     Optimized capture thread for headless operation with downsampling
-    Captures at 640x480 and downsamples to 320x240 for processing
+    Captures at 1280x960 and downsamples to 640x480 for processing
     """
     print("Starting camera capture thread (with downsampling)...")
     while True:
         try:
-            # Capture at full resolution (640x480)
+            # Capture at full resolution (1280x960)
             frame_rgb_full = picam2.capture_array("main")
             
-            # Downsample to target processing resolution (320x240)
+            # Downsample to target processing resolution (640x480)
             # This maintains the same processing workload while providing larger FOV
-            frame_rgb_downsampled = cv2.resize(frame_rgb_full, (320, 240), interpolation=cv2.INTER_AREA)
+            frame_rgb_downsampled = cv2.resize(frame_rgb_full, (640, 480), interpolation=cv2.INTER_AREA)
             
             if not frame_queue.full():
                 frame_queue.put_nowait(frame_rgb_downsampled)
@@ -247,8 +247,8 @@ def video_file_thread(video_path: str, frame_queue: Queue):
             break
             
         try:
-            # Resize frame to match processing resolution (320x240)
-            frame_resized = cv2.resize(frame, (320, 240))
+            # Resize frame to match processing resolution (640x480)
+            frame_resized = cv2.resize(frame, (640, 480))
             
             if not frame_queue.full():
                 frame_queue.put_nowait(frame_resized)
@@ -414,8 +414,8 @@ def main():
     performance_tracker = HeadlessPerformanceTracker(output_dir)
     
     print("\nHeadless tracking started!")
-    print(f"Camera FOV: 640x480 (double resolution for larger field of view)")
-    print(f"Processing resolution: 320x240 (maintains Pi Zero workload)")
+    print(f"Camera FOV: 1280x960 (double resolution for larger field of view)")
+    print(f"Processing resolution: 640x480 (maintains Pi Zero workload)")
     print(f"Target: Green objects, min area: {Config.MIN_AREA} pixels")
     if diagnostic_mode:
         print(f"DIAGNOSTIC MODE: Relaxed parameters - Area≥{Config.MIN_AREA}, Circularity≥{Config.MIN_CIRCULARITY}")

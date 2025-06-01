@@ -125,7 +125,7 @@ All parameters can be adjusted in the `Config` class within `target_tracker.py`:
 - `SEARCH_WINDOW_SIZE`: Tracking window radius (default: 20)
 
 ### Performance Parameters
-- `FRAME_WIDTH/HEIGHT`: Processing resolution (default: 320x240)
+- `FRAME_WIDTH/HEIGHT`: Processing resolution (default: 640x480)
 
 ## Target Specifications
 
@@ -174,7 +174,7 @@ Where:
 ### Performance Optimization for Pi
 
 The system is pre-configured for Pi performance:
-- Low resolution (320x240) for faster processing
+- Medium resolution (640x480) for balanced processing
 - Minimal morphological operations
 - Efficient contour filtering
 - Optimized for 15-20 FPS on Pi Zero W
