@@ -183,8 +183,8 @@ class ServoController:
         # Top-left servo: influenced by negative x and negative y
         top_left = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
         
-        # Top-right servo: influenced by positive x and negative y  
-        top_right = self.center_angle + angle_range * (norm_x - norm_y) / 2.0
+        # Top-right servo: influenced by negative x and negative y (same direction as top_left)
+        top_right = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
         
         # Bottom-left servo: influenced by negative x and positive y
         bottom_left = self.center_angle + angle_range * (-norm_x + norm_y) / 2.0
