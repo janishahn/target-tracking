@@ -45,6 +45,21 @@ class ServoController:
         self.pwm_frequency = pwm_frequency
         self.smoothing_factor = smoothing_factor
         self.pwm_objects = []
+
+        # Gains for pan/tilt control (degrees per pixel offset)
+        self.pan_gain = 0.1  # Tune this value
+        self.tilt_gain = 0.1 # Tune this value
+
+        # Servo indices for pan and tilt
+        # Assuming:
+        # Tilt servos: top_left (0), top_right (1)
+        # Pan servos: bottom_left (2), bottom_right (3)
+        self.tilt_servo_indices = [0, 1] # top_left, top_right
+        self.pan_servo_indices = [2, 3]  # bottom_left, bottom_right
+        # Primary servos for single-value targeting (e.g. servo 0 for tilt, servo 2 for pan)
+        # This isn't strictly used in the new calculate_servo_angles but good for reference
+        self.primary_tilt_servo = 0
+        self.primary_pan_servo = 2
         
         # Servo angle limits
         self.min_angle = 45.0
@@ -173,38 +188,47 @@ class ServoController:
         Returns:
             List of servo angles [top_left, top_right, bottom_left, bottom_right]
         """
-        # Normalize offsets to [-1, 1] range
-        max_x_offset = self.frame_center_x
-        max_y_offset = self.frame_center_y
-        
-        norm_x = max(-1.0, min(1.0, x_offset / max_x_offset))
-        norm_y = max(-1.0, min(1.0, y_offset / max_y_offset))
-        
-        # Calculate angle range (45° range around center)
-        angle_range = (self.max_angle - self.min_angle) / 2.0  # 45°
-        
-        # Calculate individual servo angles based on quadrant influence
-        # Top-left servo: influenced by negative x and negative y
-        top_left = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
-        
-        # Top-right servo: influenced by negative x and negative y (same direction as top_left)
-        top_right = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
-        
-        # Bottom-left servo: influenced by negative x and positive y
-        bottom_left = self.center_angle + angle_range * (-norm_x + norm_y) / 2.0
-        
-        # Bottom-right servo: influenced by positive x and positive y
-        bottom_right = self.center_angle + angle_range * (norm_x + norm_y) / 2.0
-        
-        # Clamp angles to valid range
-        angles = [
-            max(self.min_angle, min(self.max_angle, top_left)),
-            max(self.min_angle, min(self.max_angle, top_right)),
-            max(self.min_angle, min(self.max_angle, bottom_left)),
-            max(self.min_angle, min(self.max_angle, bottom_right))
-        ]
-        
-        return angles
+        new_angles = [self.center_angle] * 4  # Start from center to prevent drift
+
+        # Tilt Calculation
+        # y_offset is positive downwards.
+        # Positive tilt_adjustment should make the camera tilt UP.
+        # So, target_tilt_angle = self.center_angle - tilt_adjustment
+        # However, the problem description says:
+        # "Assuming positive y means camera tilts down (servo angle increases):
+        # target_tilt_angle = self.center_angle + tilt_adjustment"
+        # We will follow this assumption.
+        tilt_adjustment = y_offset * self.tilt_gain
+        target_tilt_angle = self.center_angle + tilt_adjustment
+
+        # Apply to tilt servos
+        # For self.tilt_servo_indices[0] (e.g., top_left, pin 18)
+        new_angles[self.tilt_servo_indices[0]] = target_tilt_angle
+        # For self.tilt_servo_indices[1] (e.g., top_right, pin 19)
+        # The inversion for this servo (180 - angle) is handled in update_servos_for_target
+        new_angles[self.tilt_servo_indices[1]] = target_tilt_angle
+
+        # Pan Calculation
+        # x_offset is positive to the right.
+        # Positive pan_adjustment should make the camera pan RIGHT.
+        # target_pan_angle = self.center_angle + pan_adjustment
+        pan_adjustment = x_offset * self.pan_gain
+        target_pan_angle = self.center_angle + pan_adjustment
+
+        # Apply to pan servos
+        # For self.pan_servo_indices[0] (e.g., bottom_left, pin 20)
+        new_angles[self.pan_servo_indices[0]] = target_pan_angle
+        # For self.pan_servo_indices[1] (e.g., bottom_right, pin 21)
+        # No inversion specified for this servo in this step.
+        new_angles[self.pan_servo_indices[1]] = target_pan_angle
+
+        # Apply Clamping
+        clamped_angles = []
+        for angle in new_angles:
+            clamped_angle = max(self.min_angle, min(self.max_angle, angle))
+            clamped_angles.append(clamped_angle)
+
+        return clamped_angles
     
     def smooth_target_position(self, x_offset, y_offset):
         """
