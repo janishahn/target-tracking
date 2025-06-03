@@ -122,12 +122,8 @@ class ServoController:
             print(f"Servo simulation: Setting all servos to {angle}°")
             return
         
-        for i, pwm in enumerate(self.pwm_objects):
-            # Invert top_right servo (pin 19, index 1) to match top_left direction
-            servo_angle = angle
-            if i == 1:  # top_right servo (pin 19)
-                servo_angle = 180.0 - angle  # Invert the angle
-            duty_cycle = self.angle_to_duty_cycle(servo_angle)
+        for pwm in self.pwm_objects:
+            duty_cycle = self.angle_to_duty_cycle(angle)
             # Send position command
             pwm.ChangeDutyCycle(duty_cycle)
         
@@ -187,8 +183,8 @@ class ServoController:
         # Top-left servo: influenced by negative x and negative y
         top_left = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
         
-        # Top-right servo: influenced by negative x and negative y (same direction as top_left)
-        top_right = self.center_angle + angle_range * (-norm_x - norm_y) / 2.0
+        # Top-right servo: influenced by positive x and negative y
+        top_right = self.center_angle + angle_range * (norm_x - norm_y) / 2.0
         
         # Bottom-left servo: influenced by negative x and positive y
         bottom_left = self.center_angle + angle_range * (-norm_x + norm_y) / 2.0
@@ -271,11 +267,7 @@ class ServoController:
                 if max_angle_change >= 2.0:  # Minimum 2° change to actuate
                     # Set servos to new positions
                     for i, pwm in enumerate(self.pwm_objects):
-                        # Invert top_right servo (pin 19, index 1) to match top_left direction
-                        angle = smoothed_angles[i]
-                        if i == 1:  # top_right servo (pin 19)
-                            angle = 180.0 - angle  # Invert the angle
-                        duty_cycle = self.angle_to_duty_cycle(angle)
+                        duty_cycle = self.angle_to_duty_cycle(smoothed_angles[i])
                         pwm.ChangeDutyCycle(duty_cycle)
                     
                     # Wait for servos to reach position
